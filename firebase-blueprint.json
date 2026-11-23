@@ -1,0 +1,514 @@
+{
+  "entities": {
+    "CompanySettings": {
+      "title": "CompanySettings",
+      "description": "TalentGrade company-wide configuration for profile, locations, working hours, attendance rules, leave defaults, and Team Leader permissions.",
+      "type": "object",
+      "properties": {
+        "companyName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "companyAddress": { "type": "string", "maxLength": 300 },
+        "companyPhone": { "type": "string", "maxLength": 40 },
+        "companyEmail": { "type": "string", "maxLength": 120 },
+        "companyWebsite": { "type": "string", "maxLength": 160 },
+        "taxId": { "type": "string", "maxLength": 80 },
+        "logoAssetId": { "type": "string", "maxLength": 128 },
+        "locations": { "type": "array" },
+        "supportedCurrencies": { "type": "array" },
+        "officeStartTime": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
+        "officeEndTime": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
+        "gracePeriodMinutes": { "type": "number" },
+        "halfDayMinHours": { "type": "number" },
+        "fullDayMinHours": { "type": "number" },
+        "workingDays": { "type": "array" },
+        "holidays": { "type": "array" },
+        "defaultSickLeave": { "type": "number" },
+        "defaultCasualLeave": { "type": "number" },
+        "leavePolicy": { "type": "object" },
+        "currency": { "type": "string", "maxLength": 10 },
+        "teamLeaderPermissions": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": [
+        "companyName",
+        "officeStartTime",
+        "officeEndTime",
+        "gracePeriodMinutes",
+        "halfDayMinHours",
+        "fullDayMinHours",
+        "workingDays",
+        "defaultSickLeave",
+        "defaultCasualLeave",
+        "currency",
+        "teamLeaderPermissions",
+        "updatedAt",
+        "updatedBy"
+      ]
+    },
+    "Department": {
+      "title": "Department",
+      "description": "Organizational department directory entry.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "code": { "type": "string", "minLength": 1, "maxLength": 20 },
+        "managerUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "code", "createdAt"]
+    },
+    "RoleEntry": {
+      "title": "RoleEntry",
+      "description": "Trusted RBAC mapping keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "email": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["super_admin", "team_leader", "employee"] },
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "status": { "type": "string", "enum": ["Active", "Inactive", "Resigned", "Terminated"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role", "employeeId", "status", "updatedAt"]
+    },
+    "Employee": {
+      "title": "Employee",
+      "description": "Employee directory, location, timezone, currency, custom schedule overrides, leave balances, and security flags.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "employeeCode": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "email": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "emergencyContact": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["super_admin", "team_leader", "employee"] },
+        "department": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "designation": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "joiningDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "status": { "type": "string", "enum": ["Active", "Inactive", "Resigned", "Terminated"] },
+        "location": { "type": "string", "maxLength": 80 },
+        "timezone": { "type": "string", "maxLength": 80 },
+        "currency": { "type": "string", "maxLength": 10 },
+        "officeStartTime": { "type": "string", "maxLength": 5 },
+        "officeEndTime": { "type": "string", "maxLength": 5 },
+        "gracePeriodMinutes": { "type": "number" },
+        "halfDayMinHours": { "type": "number" },
+        "fullDayMinHours": { "type": "number" },
+        "workingDays": { "type": "array" },
+        "managerUid": { "type": "string", "maxLength": 128 },
+        "profilePhotoAssetId": { "type": "string", "maxLength": 128 },
+        "sickLeaveBalance": { "type": "number" },
+        "casualLeaveBalance": { "type": "number" },
+        "carryForwardBalance": { "type": "number" },
+        "leavePolicyMigrated": { "type": "boolean" },
+        "leaveLastSyncedMonth": { "type": "string", "maxLength": 7 },
+        "leaveLastResetYear": { "type": "number" },
+        "clEligibilityDate": { "type": "string", "maxLength": 10 },
+        "leaveMigrationNote": { "type": "string", "maxLength": 300 },
+        "mustChangePassword": { "type": "boolean" },
+        "failedLoginAttempts": { "type": "number" },
+        "lockedUntil": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "employeeCode",
+        "fullName",
+        "email",
+        "role",
+        "department",
+        "designation",
+        "joiningDate",
+        "status",
+        "sickLeaveBalance",
+        "casualLeaveBalance",
+        "carryForwardBalance",
+        "mustChangePassword",
+        "failedLoginAttempts",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "EmployeeSalary": {
+      "title": "EmployeeSalary",
+      "description": "Strictly private salary structure per employee with assigned salary currency.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "maxLength": 128 },
+        "currency": { "type": "string", "maxLength": 10 },
+        "basicSalary": { "type": "number" },
+        "hra": { "type": "number" },
+        "otherEarnings": { "type": "array" },
+        "deductions": { "type": "array" },
+        "professionalTax": { "type": "number" },
+        "defaultBonus": { "type": "number" },
+        "netSalary": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": [
+        "employeeId",
+        "employeeUid",
+        "basicSalary",
+        "hra",
+        "otherEarnings",
+        "deductions",
+        "professionalTax",
+        "defaultBonus",
+        "netSalary",
+        "updatedAt",
+        "updatedBy"
+      ]
+    },
+    "AttendanceRecord": {
+      "title": "AttendanceRecord",
+      "description": "Daily punch-in and punch-out attendance record with GPS coordinates and server timestamps.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "managerUid": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "timezone": { "type": "string", "maxLength": 80 },
+        "punchInTime": { "type": "string", "maxLength": 40 },
+        "punchInLat": { "type": "number" },
+        "punchInLng": { "type": "number" },
+        "punchInAccuracy": { "type": "number" },
+        "punchInPhotoId": { "type": "string", "maxLength": 128 },
+        "punchOutTime": { "type": "string", "maxLength": 40 },
+        "punchOutLat": { "type": "number" },
+        "punchOutLng": { "type": "number" },
+        "punchOutAccuracy": { "type": "number" },
+        "punchOutPhotoId": { "type": "string", "maxLength": 128 },
+        "workingMinutes": { "type": "number" },
+        "status": {
+          "type": "string",
+          "enum": ["Present", "Late", "Half Day", "Absent", "Leave", "Incomplete Attendance", "Holiday", "Weekly Off"]
+        },
+        "isLate": { "type": "boolean" },
+        "lateByMinutes": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "employeeId",
+        "employeeUid",
+        "employeeName",
+        "department",
+        "date",
+        "workingMinutes",
+        "status",
+        "isLate",
+        "lateByMinutes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AttendancePhoto": {
+      "title": "AttendancePhoto",
+      "description": "Private live camera selfie captured during punch-in or punch-out.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "managerUid": { "type": "string", "maxLength": 128 },
+        "attendanceRecordId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "punchType": { "type": "string", "enum": ["in", "out"] },
+        "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "capturedAt": { "type": "string", "format": "date-time" },
+        "mimeType": { "type": "string", "maxLength": 40 },
+        "dataUrl": { "type": "string", "maxLength": 750000 }
+      },
+      "required": ["employeeId", "employeeUid", "attendanceRecordId", "punchType", "date", "capturedAt", "mimeType", "dataUrl"]
+    },
+    "MediaAsset": {
+      "title": "MediaAsset",
+      "description": "Private media asset for company logo, profile photos, or request attachments.",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "assetType": { "type": "string", "enum": ["company_logo", "profile_photo", "attachment"] },
+        "fileName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "mimeType": { "type": "string", "maxLength": 80 },
+        "dataUrl": { "type": "string", "maxLength": 750000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "assetType", "fileName", "mimeType", "dataUrl", "createdAt"]
+    },
+    "AttendanceCorrection": {
+      "title": "AttendanceCorrection",
+      "description": "Employee request to correct punch-in or punch-out times.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "managerUid": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "attendanceRecordId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "requestedPunchIn": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
+        "requestedPunchOut": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
+        "reason": { "type": "string", "minLength": 3, "maxLength": 500 },
+        "attachmentAssetId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["Pending", "Approved", "Rejected"] },
+        "reviewedBy": { "type": "string", "maxLength": 128 },
+        "reviewedByName": { "type": "string", "maxLength": 120 },
+        "reviewComment": { "type": "string", "maxLength": 500 },
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "employeeId",
+        "employeeUid",
+        "employeeName",
+        "department",
+        "date",
+        "attendanceRecordId",
+        "requestedPunchIn",
+        "requestedPunchOut",
+        "reason",
+        "status",
+        "createdAt"
+      ]
+    },
+    "LeaveApplication": {
+      "title": "LeaveApplication",
+      "description": "Employee leave request and approval status.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "managerUid": { "type": "string", "maxLength": 128 },
+        "leaveType": { "type": "string", "enum": ["SL", "CL", "LWP"] },
+        "startDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "endDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "days": { "type": "number" },
+        "reason": { "type": "string", "minLength": 3, "maxLength": 500 },
+        "attachmentAssetId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["Pending", "Approved", "Rejected", "Cancelled"] },
+        "balanceDeducted": { "type": "boolean" },
+        "deductedAmount": { "type": "number" },
+        "reviewedBy": { "type": "string", "maxLength": 128 },
+        "reviewedByName": { "type": "string", "maxLength": 120 },
+        "reviewComment": { "type": "string", "maxLength": 500 },
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "employeeId",
+        "employeeUid",
+        "employeeName",
+        "department",
+        "leaveType",
+        "startDate",
+        "endDate",
+        "days",
+        "reason",
+        "status",
+        "balanceDeducted",
+        "deductedAmount",
+        "createdAt"
+      ]
+    },
+    "PayrollRecord": {
+      "title": "PayrollRecord",
+      "description": "Monthly manual payroll entry and published payslip record in employee currency.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "maxLength": 128 },
+        "employeeName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "employeeCode": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "designation": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "location": { "type": "string", "maxLength": 80 },
+        "currency": { "type": "string", "maxLength": 10 },
+        "month": { "type": "string", "pattern": "^\\d{4}-\\d{2}$" },
+        "basicSalary": { "type": "number" },
+        "hra": { "type": "number" },
+        "otherEarnings": { "type": "array" },
+        "bonus": { "type": "number" },
+        "deductions": { "type": "array" },
+        "professionalTax": { "type": "number" },
+        "grossEarnings": { "type": "number" },
+        "totalDeductions": { "type": "number" },
+        "netSalary": { "type": "number" },
+        "workingDaysInMonth": { "type": "number" },
+        "presentDays": { "type": "number" },
+        "leaveDays": { "type": "number" },
+        "status": { "type": "string", "enum": ["Draft", "Finalized", "Published"] },
+        "notes": { "type": "string", "maxLength": 500 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "publishedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "employeeId",
+        "employeeUid",
+        "employeeName",
+        "employeeCode",
+        "designation",
+        "department",
+        "month",
+        "basicSalary",
+        "hra",
+        "otherEarnings",
+        "bonus",
+        "deductions",
+        "professionalTax",
+        "grossEarnings",
+        "totalDeductions",
+        "netSalary",
+        "workingDaysInMonth",
+        "presentDays",
+        "leaveDays",
+        "status",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LeaveLedgerEntry": {
+      "title": "LeaveLedgerEntry",
+      "description": "Immutable permanent leave accrual, annual reset, carry-forward, deduction, and adjustment ledger entry.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "maxLength": 128 },
+        "employeeEmail": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "employeeName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "leaveType": { "type": "string", "enum": ["SL", "CL", "LWP"] },
+        "entryType": {
+          "type": "string",
+          "enum": [
+            "monthly_accrual",
+            "year_reset",
+            "carry_forward",
+            "approved_deduction",
+            "leave_reversal",
+            "admin_adjustment",
+            "migration_baseline"
+          ]
+        },
+        "month": { "type": "string", "pattern": "^\\d{4}-\\d{2}$" },
+        "year": { "type": "number" },
+        "amount": { "type": "number" },
+        "balanceAfter": { "type": "number" },
+        "source": {
+          "type": "string",
+          "enum": [
+            "accrual_engine",
+            "annual_cycle",
+            "leave_approval",
+            "leave_reversal",
+            "admin_manual",
+            "legacy_migration"
+          ]
+        },
+        "referenceId": { "type": "string", "maxLength": 160 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdByName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "employeeId",
+        "employeeUid",
+        "employeeEmail",
+        "employeeName",
+        "leaveType",
+        "entryType",
+        "month",
+        "year",
+        "amount",
+        "source",
+        "reason",
+        "createdBy",
+        "createdByName",
+        "createdAt"
+      ]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable audit trail for attendance edits, leave approvals, payroll updates, and settings changes.",
+      "type": "object",
+      "properties": {
+        "actorUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "actorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "actorRole": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "action": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "entityType": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "entityId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "previousValues": { "type": "object" },
+        "updatedValues": { "type": "object" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorUid", "actorName", "actorRole", "action", "entityType", "entityId", "summary", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/companySettings/{settingId}": {
+      "schema": { "$ref": "#/entities/CompanySettings" },
+      "description": "Company profile, locations, working hours, holidays, and RBAC permission settings."
+    },
+    "/departments/{deptId}": {
+      "schema": { "$ref": "#/entities/Department" },
+      "description": "Company departments."
+    },
+    "/roles/{uid}": {
+      "schema": { "$ref": "#/entities/RoleEntry" },
+      "description": "Trusted role assignments per authenticated UID."
+    },
+    "/employees/{employeeId}": {
+      "schema": { "$ref": "#/entities/Employee" },
+      "description": "Employee master records including individual timezone, currency, location, and schedule overrides."
+    },
+    "/employeeSalaries/{employeeId}": {
+      "schema": { "$ref": "#/entities/EmployeeSalary" },
+      "description": "Confidential salary configurations isolated from non-payroll roles."
+    },
+    "/attendanceRecords/{recordId}": {
+      "schema": { "$ref": "#/entities/AttendanceRecord" },
+      "description": "Daily employee attendance records."
+    },
+    "/attendancePhotos/{photoId}": {
+      "schema": { "$ref": "#/entities/AttendancePhoto" },
+      "description": "Private punch-in/punch-out camera selfies."
+    },
+    "/mediaAssets/{assetId}": {
+      "schema": { "$ref": "#/entities/MediaAsset" },
+      "description": "Company logo, profile photos, and leave/correction supporting attachments."
+    },
+    "/attendanceCorrections/{correctionId}": {
+      "schema": { "$ref": "#/entities/AttendanceCorrection" },
+      "description": "Employee attendance correction requests."
+    },
+    "/leaveApplications/{leaveId}": {
+      "schema": { "$ref": "#/entities/LeaveApplication" },
+      "description": "Employee leave requests."
+    },
+    "/leaveLedger/{entryId}": {
+      "schema": { "$ref": "#/entities/LeaveLedgerEntry" },
+      "description": "Immutable permanent leave accrual, annual reset, carry-forward, and adjustment ledger."
+    },
+    "/payrollRecords/{payrollId}": {
+      "schema": { "$ref": "#/entities/PayrollRecord" },
+      "description": "Monthly manual payroll and payslip records."
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable security and operational audit trail."
+    }
+  }
+}

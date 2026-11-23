@@ -1,0 +1,6 @@
+{
+  "name": "PeopleDesk Internal HR",
+  "description": "Internal company attendance, leave, employee directory, and manual payroll management application.",
+  "requestFramePermissions": ["camera", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

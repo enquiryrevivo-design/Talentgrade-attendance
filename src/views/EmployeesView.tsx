@@ -1,0 +1,1782 @@
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  UserPlus,
+  Search,
+  Edit3,
+  KeyRound,
+  X,
+  UserCheck,
+  UserX,
+  RefreshCw,
+  Upload,
+} from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import { useToast } from '../components/Toast';
+import {
+  AttendanceRecord,
+  Department,
+  Employee,
+  EmployeeSalary,
+  EmployeeStatus,
+  LeaveApplication,
+  LeaveLedgerEntry,
+  UserRole,
+} from '../types/hr';
+import {
+  compressImageFile,
+  createEmployeeAccount,
+  fetchAllEmployees,
+  fetchAttendanceRecords,
+  fetchEmployeeSalary,
+  fetchLeaveApplications,
+  fetchLeaveLedger,
+  fetchMediaAsset,
+  formatMoney,
+  getDepartments,
+  getEffectiveSchedule,
+  getTodayInTimezone,
+  LOCATION_PRESETS,
+  saveEmployeeSalary,
+  updateEmployeeProfile,
+  uploadMediaAsset,
+} from '../lib/hrService';
+import {
+  calculateCasualLeaveEligibilityDate,
+  computeEmployeeLeaveAccrualPlan,
+  normalizeLeavePolicyConfig,
+} from '../../shared/leaveAccrualEngine';
+
+const WEEKDAYS = [
+  { day: 0, label: 'Sun' },
+  { day: 1, label: 'Mon' },
+  { day: 2, label: 'Tue' },
+  { day: 3, label: 'Wed' },
+  { day: 4, label: 'Thu' },
+  { day: 5, label: 'Fri' },
+  { day: 6, label: 'Sat' },
+];
+
+const TIMEZONES = ['Asia/Kolkata', 'Asia/Dubai', 'UTC'];
+
+function generateTempPassword(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#';
+  let out = '';
+  for (let i = 0; i < 10; i++) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return out;
+}
+
+function getInitials(name: string): string {
+  return name
+    .split(' ')
+    .filter(Boolean)
+    .map((p) => p[0])
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+export function EmployeesView() {
+  const { employee, settings, requestPasswordReset, refreshSession } = useAuth();
+  const { showToast } = useToast();
+
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+
+  const [search, setSearch] = useState('');
+  const [locationFilter, setLocationFilter] = useState('all');
+  const [deptFilter, setDeptFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [roleFilter, setRoleFilter] = useState('all');
+
+  // Create Employee Modal
+  const [createOpen, setCreateOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createCustomSchedule, setCreateCustomSchedule] = useState(false);
+  const [leaveManualOverride, setLeaveManualOverride] = useState(false);
+  const [newPhotoPreview, setNewPhotoPreview] = useState<string | null>(null);
+  const [newEmp, setNewEmp] = useState({
+    fullName: '',
+    employeeCode: '',
+    email: '',
+    phone: '',
+    emergencyContact: '',
+    role: 'employee' as UserRole,
+    department: '',
+    designation: '',
+    joiningDate: new Date().toISOString().slice(0, 10),
+    location: 'India',
+    timezone: 'Asia/Kolkata',
+    currency: 'INR',
+    officeStartTime: '09:30',
+    officeEndTime: '18:30',
+    gracePeriodMinutes: 15,
+    halfDayMinHours: 4,
+    fullDayMinHours: 8,
+    workingDays: [1, 2, 3, 4, 5] as number[],
+    managerUid: '',
+    sickLeaveBalance: 1,
+    casualLeaveBalance: 0,
+    carryForwardBalance: 0,
+    temporaryPassword: generateTempPassword(),
+    mustChangePassword: true,
+  });
+
+  // Profile Drawer / Modal
+  const [selectedEmp, setSelectedEmp] = useState<Employee | null>(null);
+  const [profileTab, setProfileTab] = useState<'profile' | 'attendance' | 'leave' | 'payroll'>('profile');
+  const [empAttendance, setEmpAttendance] = useState<AttendanceRecord[]>([]);
+  const [empLeaves, setEmpLeaves] = useState<LeaveApplication[]>([]);
+  const [empLedger, setEmpLedger] = useState<LeaveLedgerEntry[]>([]);
+  const [empSalary, setEmpSalary] = useState<EmployeeSalary | null>(null);
+  const [editForm, setEditForm] = useState<Partial<Employee>>({});
+  const [editCustomSchedule, setEditCustomSchedule] = useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [salaryForm, setSalaryForm] = useState({
+    currency: 'INR',
+    basicSalary: 0,
+    hra: 0,
+    professionalTax: 0,
+    defaultBonus: 0,
+  });
+
+  const loadData = useCallback(async () => {
+    if (!employee) return;
+    setLoading(true);
+    try {
+      const [empList, deptList] = await Promise.all([
+        fetchAllEmployees(employee),
+        getDepartments(),
+      ]);
+      setEmployees(empList);
+      setDepartments(deptList);
+      if (deptList.length > 0 && !newEmp.department) {
+        setNewEmp((p) => ({ ...p, department: deptList[0].name }));
+      }
+
+      // Fetch profile avatars in parallel cleanly
+      const withPhotos = empList.filter((e) => Boolean(e.profilePhotoAssetId));
+      if (withPhotos.length > 0) {
+        const entries = await Promise.all(
+          withPhotos.map(async (e) => {
+            const asset = await fetchMediaAsset(e.profilePhotoAssetId!);
+            return asset?.dataUrl ? ([e.id, asset.dataUrl] as const) : null;
+          })
+        );
+        const map: Record<string, string> = {};
+        for (const item of entries) {
+          if (item) map[item[0]] = item[1];
+        }
+        setPhotoUrls(map);
+      }
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Failed to load directory', 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [employee, showToast, newEmp.department]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  if (!employee || !settings) return null;
+
+  const isSuperAdmin = employee.role === 'super_admin';
+  const canViewSalary =
+    isSuperAdmin || (employee.role === 'team_leader' && settings.teamLeaderPermissions.canViewSalary);
+
+  const availableLocations =
+    settings.locations && settings.locations.length > 0 ? settings.locations : ['India', 'Dubai, UAE'];
+
+  const computeOpeningBalances = (joiningDate: string, timezone: string) => {
+    const policy = normalizeLeavePolicyConfig(settings.leavePolicy);
+    const plan = computeEmployeeLeaveAccrualPlan({
+      employee: {
+        id: 'preview_new',
+        uid: '',
+        email: 'preview@talentgrade.io',
+        fullName: 'New Employee',
+        joiningDate,
+        status: 'Active',
+        timezone,
+        sickLeaveBalance: 0,
+        casualLeaveBalance: 0,
+        carryForwardBalance: 0,
+      },
+      policy,
+      existingLedger: [],
+      approvedLeaves: [],
+      referenceNow: new Date(),
+      actorUid: employee.uid,
+      actorName: employee.fullName,
+      isNewEmployeeInit: true,
+    });
+    return plan.summary;
+  };
+
+  const handleNewLocationChange = (loc: string) => {
+    const preset = LOCATION_PRESETS[loc];
+    const nextTz = preset ? preset.timezone : newEmp.timezone;
+    const summary = computeOpeningBalances(newEmp.joiningDate, nextTz);
+    setNewEmp((p) => ({
+      ...p,
+      location: loc,
+      timezone: nextTz,
+      currency: preset ? preset.currency : p.currency,
+      ...(leaveManualOverride
+        ? {}
+        : {
+            sickLeaveBalance: summary.sickLeaveBalance,
+            casualLeaveBalance: summary.casualLeaveBalance,
+            carryForwardBalance: summary.carryForwardBalance,
+          }),
+    }));
+  };
+
+  const handleEditLocationChange = (loc: string) => {
+    const preset = LOCATION_PRESETS[loc];
+    setEditForm((p) => ({
+      ...p,
+      location: loc,
+      timezone: preset ? preset.timezone : p.timezone,
+      currency: preset ? preset.currency : p.currency,
+    }));
+  };
+
+  const handleNewPhotoSelect = async (file: File) => {
+    try {
+      const compressed = await compressImageFile(file, 360);
+      setNewPhotoPreview(compressed);
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Could not process image', 'error');
+    }
+  };
+
+  const handleProfilePhotoUpload = async (file: File) => {
+    if (!selectedEmp || !isSuperAdmin) return;
+    setUploadingPhoto(true);
+    try {
+      const compressed = await compressImageFile(file, 360);
+      const assetId = await uploadMediaAsset({
+        ownerUid: employee.uid,
+        assetType: 'profile_photo',
+        fileName: file.name,
+        mimeType: 'image/jpeg',
+        dataUrl: compressed,
+      });
+      await updateEmployeeProfile(selectedEmp.id, { profilePhotoAssetId: assetId }, employee);
+      setPhotoUrls((prev) => ({ ...prev, [selectedEmp.id]: compressed }));
+      setSelectedEmp((prev) => (prev ? { ...prev, profilePhotoAssetId: assetId } : null));
+      showToast('Profile photo updated.', 'success');
+      if (selectedEmp.id === employee.id) {
+        await refreshSession();
+      }
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Photo upload failed', 'error');
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
+
+  const openProfile = async (emp: Employee) => {
+    setSelectedEmp(emp);
+    setProfileTab('profile');
+    const hasCustomSchedule = Boolean(
+      emp.officeStartTime ||
+        emp.officeEndTime ||
+        typeof emp.gracePeriodMinutes === 'number' ||
+        (emp.workingDays && emp.workingDays.length > 0)
+    );
+    setEditCustomSchedule(hasCustomSchedule);
+
+    const effective = getEffectiveSchedule(emp, settings);
+    setEditForm({
+      fullName: emp.fullName,
+      email: emp.email,
+      phone: emp.phone || '',
+      emergencyContact: emp.emergencyContact || '',
+      role: emp.role,
+      department: emp.department,
+      designation: emp.designation,
+      joiningDate: emp.joiningDate,
+      status: emp.status,
+      location: emp.location || effective.location,
+      timezone: emp.timezone || effective.timezone,
+      currency: emp.currency || effective.currency,
+      officeStartTime: effective.officeStartTime,
+      officeEndTime: effective.officeEndTime,
+      gracePeriodMinutes: effective.gracePeriodMinutes,
+      halfDayMinHours: effective.halfDayMinHours,
+      fullDayMinHours: effective.fullDayMinHours,
+      workingDays: effective.workingDays,
+      managerUid: emp.managerUid || '',
+      sickLeaveBalance: emp.sickLeaveBalance,
+      casualLeaveBalance: emp.casualLeaveBalance,
+      carryForwardBalance: emp.carryForwardBalance,
+    });
+
+    try {
+      const [allAtt, allLeaves, allLedger] = await Promise.all([
+        fetchAttendanceRecords(employee),
+        fetchLeaveApplications(employee),
+        fetchLeaveLedger(employee),
+      ]);
+      setEmpAttendance(allAtt.filter((a) => a.employeeId === emp.id).slice(0, 30));
+      setEmpLeaves(allLeaves.filter((l) => l.employeeId === emp.id));
+      setEmpLedger(allLedger.filter((x) => x.employeeId === emp.id));
+
+      if (canViewSalary) {
+        const sal = await fetchEmployeeSalary(emp.id);
+        setEmpSalary(sal);
+        setSalaryForm({
+          currency: sal?.currency || emp.currency || effective.currency,
+          basicSalary: sal?.basicSalary ?? 0,
+          hra: sal?.hra ?? 0,
+          professionalTax: sal?.professionalTax ?? 0,
+          defaultBonus: sal?.defaultBonus ?? 0,
+        });
+      }
+    } catch {
+      // Handled gracefully
+    }
+  };
+
+  const handleCreateSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCreating(true);
+    try {
+      let profilePhotoAssetId: string | undefined;
+      if (newPhotoPreview) {
+        profilePhotoAssetId = await uploadMediaAsset({
+          ownerUid: employee.uid,
+          assetType: 'profile_photo',
+          fileName: `${newEmp.employeeCode || 'profile'}.jpg`,
+          mimeType: 'image/jpeg',
+          dataUrl: newPhotoPreview,
+        });
+      }
+
+      const res = await createEmployeeAccount(
+        {
+          employeeCode: newEmp.employeeCode,
+          fullName: newEmp.fullName,
+          email: newEmp.email,
+          phone: newEmp.phone,
+          emergencyContact: newEmp.emergencyContact,
+          role: newEmp.role,
+          department: newEmp.department || departments[0]?.name || 'Operations',
+          designation: newEmp.designation,
+          joiningDate: newEmp.joiningDate,
+          location: newEmp.location,
+          timezone: newEmp.timezone,
+          currency: newEmp.currency,
+          officeStartTime: createCustomSchedule ? newEmp.officeStartTime : undefined,
+          officeEndTime: createCustomSchedule ? newEmp.officeEndTime : undefined,
+          gracePeriodMinutes: createCustomSchedule ? newEmp.gracePeriodMinutes : undefined,
+          halfDayMinHours: createCustomSchedule ? newEmp.halfDayMinHours : undefined,
+          fullDayMinHours: createCustomSchedule ? newEmp.fullDayMinHours : undefined,
+          workingDays: createCustomSchedule ? newEmp.workingDays : undefined,
+          profilePhotoAssetId,
+          managerUid: newEmp.managerUid,
+          sickLeaveBalance: newEmp.sickLeaveBalance,
+          casualLeaveBalance: newEmp.casualLeaveBalance,
+          carryForwardBalance: newEmp.carryForwardBalance,
+          temporaryPassword: newEmp.temporaryPassword,
+          mustChangePassword: newEmp.mustChangePassword,
+        },
+        employee,
+        { leavePolicy: settings.leavePolicy }
+      );
+      showToast(
+        res.note || `Created account for ${res.employee.fullName} (${res.employee.employeeCode}).`,
+        'success'
+      );
+      setCreateOpen(false);
+      setNewPhotoPreview(null);
+      setCreateCustomSchedule(false);
+      setLeaveManualOverride(false);
+      const resetJoin = getTodayInTimezone('Asia/Kolkata');
+      const resetSummary = computeOpeningBalances(resetJoin, 'Asia/Kolkata');
+      setNewEmp({
+        fullName: '',
+        employeeCode: '',
+        email: '',
+        phone: '',
+        emergencyContact: '',
+        role: 'employee',
+        department: departments[0]?.name || '',
+        designation: '',
+        joiningDate: resetJoin,
+        location: 'India',
+        timezone: 'Asia/Kolkata',
+        currency: 'INR',
+        officeStartTime: settings.officeStartTime || '09:30',
+        officeEndTime: settings.officeEndTime || '18:30',
+        gracePeriodMinutes: settings.gracePeriodMinutes ?? 15,
+        halfDayMinHours: settings.halfDayMinHours ?? 4,
+        fullDayMinHours: settings.fullDayMinHours ?? 8,
+        workingDays: settings.workingDays || [1, 2, 3, 4, 5],
+        managerUid: '',
+        sickLeaveBalance: resetSummary.sickLeaveBalance,
+        casualLeaveBalance: resetSummary.casualLeaveBalance,
+        carryForwardBalance: resetSummary.carryForwardBalance,
+        temporaryPassword: generateTempPassword(),
+        mustChangePassword: true,
+      });
+      await loadData();
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Could not create employee', 'error');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedEmp || !isSuperAdmin) return;
+    setSavingEdit(true);
+    try {
+      const payload: Partial<Employee> = {
+        fullName: editForm.fullName,
+        phone: editForm.phone,
+        emergencyContact: editForm.emergencyContact,
+        role: editForm.role,
+        department: editForm.department,
+        designation: editForm.designation,
+        joiningDate: editForm.joiningDate,
+        status: editForm.status,
+        location: editForm.location,
+        timezone: editForm.timezone,
+        currency: editForm.currency,
+        managerUid: editForm.managerUid,
+        sickLeaveBalance: editForm.sickLeaveBalance,
+        casualLeaveBalance: editForm.casualLeaveBalance,
+        carryForwardBalance: editForm.carryForwardBalance,
+      };
+
+      if (editCustomSchedule) {
+        payload.officeStartTime = editForm.officeStartTime;
+        payload.officeEndTime = editForm.officeEndTime;
+        payload.gracePeriodMinutes = editForm.gracePeriodMinutes;
+        payload.halfDayMinHours = editForm.halfDayMinHours;
+        payload.fullDayMinHours = editForm.fullDayMinHours;
+        payload.workingDays = editForm.workingDays;
+      }
+
+      await updateEmployeeProfile(selectedEmp.id, payload, employee, {
+        clearScheduleOverrides: !editCustomSchedule,
+        leavePolicy: settings.leavePolicy,
+      });
+      showToast('Employee profile updated.', 'success');
+      await loadData();
+      if (selectedEmp.id === employee.id) {
+        await refreshSession();
+      }
+      setSelectedEmp((prev) => {
+        if (!prev) return null;
+        const next = { ...prev, ...payload } as Employee;
+        if (!editCustomSchedule) {
+          delete next.officeStartTime;
+          delete next.officeEndTime;
+          delete next.gracePeriodMinutes;
+          delete next.halfDayMinHours;
+          delete next.fullDayMinHours;
+          delete next.workingDays;
+        }
+        return next;
+      });
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Update failed', 'error');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const handleToggleStatus = async (emp: Employee) => {
+    if (!isSuperAdmin) return;
+    const nextStatus: EmployeeStatus = emp.status === 'Active' ? 'Inactive' : 'Active';
+    try {
+      await updateEmployeeProfile(emp.id, { status: nextStatus }, employee);
+      showToast(`${emp.fullName} marked as ${nextStatus}.`, 'info');
+      await loadData();
+      if (selectedEmp?.id === emp.id) {
+        setSelectedEmp({ ...emp, status: nextStatus });
+        setEditForm((p) => ({ ...p, status: nextStatus }));
+      }
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Status update failed', 'error');
+    }
+  };
+
+  const handleResetPassword = async (emp: Employee) => {
+    try {
+      await requestPasswordReset(emp.email);
+      await updateEmployeeProfile(emp.id, { mustChangePassword: true }, employee);
+      showToast(`Password reset triggered for ${emp.email}.`, 'success');
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Could not send reset email', 'error');
+    }
+  };
+
+  const handleSaveQuickSalary = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedEmp || !isSuperAdmin) return;
+    try {
+      const saved = await saveEmployeeSalary(
+        {
+          employee: selectedEmp,
+          currency: salaryForm.currency,
+          basicSalary: salaryForm.basicSalary,
+          hra: salaryForm.hra,
+          otherEarnings: empSalary?.otherEarnings || [],
+          deductions: empSalary?.deductions || [],
+          professionalTax: salaryForm.professionalTax,
+          defaultBonus: salaryForm.defaultBonus,
+        },
+        employee
+      );
+      setEmpSalary(saved);
+      showToast(`Salary configuration saved (${salaryForm.currency}).`, 'success');
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Could not save salary', 'error');
+    }
+  };
+
+  const filtered = employees.filter((emp) => {
+    const loc = emp.location || 'India';
+    if (locationFilter !== 'all' && loc !== locationFilter) return false;
+    if (deptFilter !== 'all' && emp.department !== deptFilter) return false;
+    if (statusFilter !== 'all' && emp.status !== statusFilter) return false;
+    if (roleFilter !== 'all' && emp.role !== roleFilter) return false;
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      return (
+        emp.fullName.toLowerCase().includes(q) ||
+        emp.employeeCode.toLowerCase().includes(q) ||
+        emp.email.toLowerCase().includes(q) ||
+        emp.designation.toLowerCase().includes(q)
+      );
+    }
+    return true;
+  });
+
+  const leaders = employees.filter((e) => e.role === 'team_leader' || e.role === 'super_admin');
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-display font-semibold text-zinc-950 dark:text-zinc-100">
+            TalentGrade Directory
+          </h1>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+            {employees.length} team members across India &amp; Dubai, UAE · Manage profiles, schedules, leave balances &amp; currency
+          </p>
+        </div>
+        {isSuperAdmin && (
+          <button
+            type="button"
+            onClick={() => {
+              const initJoin = getTodayInTimezone('Asia/Kolkata');
+              const opening = computeOpeningBalances(initJoin, 'Asia/Kolkata');
+              setLeaveManualOverride(false);
+              setNewEmp((p) => ({
+                ...p,
+                employeeCode: `TG-${String(employees.length + 1).padStart(3, '0')}`,
+                joiningDate: initJoin,
+                sickLeaveBalance: opening.sickLeaveBalance,
+                casualLeaveBalance: opening.casualLeaveBalance,
+                carryForwardBalance: opening.carryForwardBalance,
+                temporaryPassword: generateTempPassword(),
+                officeStartTime: settings.officeStartTime || '09:30',
+                officeEndTime: settings.officeEndTime || '18:30',
+                gracePeriodMinutes: settings.gracePeriodMinutes ?? 15,
+                halfDayMinHours: settings.halfDayMinHours ?? 4,
+                fullDayMinHours: settings.fullDayMinHours ?? 8,
+                workingDays: settings.workingDays || [1, 2, 3, 4, 5],
+              }));
+              setCreateOpen(true);
+            }}
+            className="min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-[#B5121B] hover:bg-[#960E16] text-white text-xs font-semibold"
+          >
+            <UserPlus className="w-4 h-4" />
+            Add Employee
+          </button>
+        )}
+      </div>
+
+      {/* Search & Filter Bar */}
+      <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-4 flex flex-wrap items-center gap-3">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search name, ID, email, designation..."
+            className="w-full min-h-[40px] pl-9 pr-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-xs"
+          />
+        </div>
+
+        <select
+          value={locationFilter}
+          onChange={(e) => setLocationFilter(e.target.value)}
+          className="min-h-[40px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-xs"
+        >
+          <option value="all">All Locations</option>
+          {availableLocations.map((loc) => (
+            <option key={loc} value={loc}>
+              {loc}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={deptFilter}
+          onChange={(e) => setDeptFilter(e.target.value)}
+          className="min-h-[40px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-xs"
+        >
+          <option value="all">All Departments</option>
+          {departments.map((d) => (
+            <option key={d.id} value={d.name}>
+              {d.name}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="min-h-[40px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-xs"
+        >
+          <option value="all">All Statuses</option>
+          <option value="Active">Active</option>
+          <option value="Inactive">Inactive</option>
+          <option value="Resigned">Resigned</option>
+          <option value="Terminated">Terminated</option>
+        </select>
+
+        <select
+          value={roleFilter}
+          onChange={(e) => setRoleFilter(e.target.value)}
+          className="min-h-[40px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-xs"
+        >
+          <option value="all">All Roles</option>
+          <option value="super_admin">Super Admin</option>
+          <option value="team_leader">Team Leader</option>
+          <option value="employee">Employee</option>
+        </select>
+      </div>
+
+      {/* Directory Table */}
+      <section className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl overflow-hidden">
+        {loading ? (
+          <div className="p-6 space-y-3">
+            <div className="h-12 rounded-lg bg-zinc-100 dark:bg-zinc-800 animate-pulse" />
+            <div className="h-12 rounded-lg bg-zinc-100 dark:bg-zinc-800 animate-pulse" />
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="p-10 text-center text-xs text-zinc-500">No matching employees found.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950/50 text-zinc-500">
+                  <th className="py-3 px-4 font-medium">Employee</th>
+                  <th className="py-3 px-4 font-medium">ID</th>
+                  <th className="py-3 px-4 font-medium">Department &amp; Role</th>
+                  <th className="py-3 px-4 font-medium">Location &amp; Currency</th>
+                  <th className="py-3 px-4 font-medium">Status</th>
+                  <th className="py-3 px-4 font-medium text-right">SL / CL</th>
+                  <th className="py-3 px-4 font-medium text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                {filtered.map((emp) => {
+                  const effective = getEffectiveSchedule(emp, settings);
+                  const avatar = photoUrls[emp.id];
+                  return (
+                    <tr key={emp.id} className="hover:bg-zinc-50/70 dark:hover:bg-zinc-800/40">
+                      <td className="py-3 px-4">
+                        <div className="flex items-center gap-3">
+                          {avatar ? (
+                            <img
+                              src={avatar}
+                              alt={emp.fullName}
+                              className="w-8 h-8 rounded-full object-cover border border-zinc-200 dark:border-zinc-700 shrink-0"
+                            />
+                          ) : (
+                            <div className="w-8 h-8 rounded-full bg-zinc-900 dark:bg-zinc-800 text-white flex items-center justify-center text-[11px] font-semibold shrink-0">
+                              {getInitials(emp.fullName)}
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <div className="font-semibold text-zinc-950 dark:text-zinc-100 truncate">{emp.fullName}</div>
+                            <div className="text-[11px] text-zinc-500 truncate">{emp.email}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-3 px-4 font-mono tabular-nums whitespace-nowrap">{emp.employeeCode}</td>
+                      <td className="py-3 px-4">
+                        <div>{emp.department}</div>
+                        <div className="text-[11px] text-zinc-500">
+                          {emp.designation} ·{' '}
+                          {emp.role === 'super_admin' ? 'Super Admin' : emp.role === 'team_leader' ? 'Team Leader' : 'Employee'}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        <div className="font-medium text-zinc-900 dark:text-zinc-100">
+                          {effective.location} · {effective.currency}
+                        </div>
+                        <div className="text-[11px] text-zinc-500 font-mono">
+                          {effective.timezone} · {effective.officeStartTime}–{effective.officeEndTime}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4 whitespace-nowrap font-medium">
+                        <span
+                          className={
+                            emp.status === 'Active'
+                              ? 'text-emerald-700 dark:text-emerald-400'
+                              : 'text-[#B5121B] dark:text-red-400'
+                          }
+                        >
+                          {emp.status}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap">
+                        {emp.sickLeaveBalance} / {emp.casualLeaveBalance}
+                      </td>
+                      <td className="py-3 px-4 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => openProfile(emp)}
+                            className="min-h-[34px] px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-xs font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 inline-flex items-center gap-1"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                            Profile
+                          </button>
+                          {isSuperAdmin && emp.id !== employee.id && (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleStatus(emp)}
+                              title={emp.status === 'Active' ? 'Deactivate Account' : 'Activate Account'}
+                              className="min-h-[34px] px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                            >
+                              {emp.status === 'Active' ? (
+                                <UserX className="w-3.5 h-3.5 text-[#B5121B]" />
+                              ) : (
+                                <UserCheck className="w-3.5 h-3.5 text-emerald-600" />
+                              )}
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* Create Employee Modal */}
+      {createOpen && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <form
+            onSubmit={handleCreateSubmit}
+            className="w-full max-w-2xl bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 overflow-hidden shadow-2xl max-h-[92vh] flex flex-col"
+          >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-200 dark:border-zinc-800">
+              <h3 className="text-base font-semibold">Create TalentGrade Employee</h3>
+              <button type="button" onClick={() => setCreateOpen(false)} className="text-zinc-500 p-1">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 overflow-y-auto text-xs">
+              {/* Profile Photo Optional Upload */}
+              <div className="flex items-center gap-4 pb-3 border-b border-zinc-200 dark:border-zinc-800">
+                {newPhotoPreview ? (
+                  <img
+                    src={newPhotoPreview}
+                    alt="Employee preview"
+                    className="w-12 h-12 rounded-full object-cover border border-zinc-200 dark:border-zinc-700"
+                  />
+                ) : (
+                  <div className="w-12 h-12 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 flex items-center justify-center font-semibold">
+                    {newEmp.fullName ? getInitials(newEmp.fullName) : 'TG'}
+                  </div>
+                )}
+                <div>
+                  <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800 font-medium">
+                    <Upload className="w-3.5 h-3.5" />
+                    Upload Profile Photo
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) handleNewPhotoSelect(f);
+                      }}
+                    />
+                  </label>
+                  <div className="text-[11px] text-zinc-500 mt-1">Optional · Automatically resized</div>
+                </div>
+              </div>
+
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium mb-1">Full Name *</label>
+                  <input
+                    required
+                    value={newEmp.fullName}
+                    onChange={(e) => setNewEmp((p) => ({ ...p, fullName: e.target.value }))}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">Employee ID *</label>
+                  <input
+                    required
+                    value={newEmp.employeeCode}
+                    onChange={(e) => setNewEmp((p) => ({ ...p, employeeCode: e.target.value }))}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-medium mb-1">Work Email *</label>
+                  <input
+                    type="email"
+                    required
+                    value={newEmp.email}
+                    onChange={(e) => setNewEmp((p) => ({ ...p, email: e.target.value }))}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">Phone Number</label>
+                  <input
+                    value={newEmp.phone}
+                    onChange={(e) => setNewEmp((p) => ({ ...p, phone: e.target.value }))}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">Emergency Contact</label>
+                  <input
+                    value={newEmp.emergencyContact}
+                    onChange={(e) => setNewEmp((p) => ({ ...p, emergencyContact: e.target.value }))}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                  />
+                </div>
+              </div>
+
+              {/* Location, Timezone & Currency */}
+              <div className="grid sm:grid-cols-3 gap-3 p-3 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800">
+                <div>
+                  <label className="block font-medium mb-1">Country / Location *</label>
+                  <select
+                    value={newEmp.location}
+                    onChange={(e) => handleNewLocationChange(e.target.value)}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900"
+                  >
+                    {availableLocations.map((loc) => (
+                      <option key={loc} value={loc}>
+                        {loc}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">Timezone *</label>
+                  <select
+                    value={newEmp.timezone}
+                    onChange={(e) => setNewEmp((p) => ({ ...p, timezone: e.target.value }))}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
+                  >
+                    {TIMEZONES.map((tz) => (
+                      <option key={tz} value={tz}>
+                        {tz}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">Salary Currency *</label>
+                  <select
+                    value={newEmp.currency}
+                    onChange={(e) => setNewEmp((p) => ({ ...p, currency: e.target.value }))}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
+                  >
+                    <option value="INR">INR (₹)</option>
+                    <option value="AED">AED (د.إ)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-medium mb-1">Role *</label>
+                  <select
+                    value={newEmp.role}
+                    onChange={(e) => setNewEmp((p) => ({ ...p, role: e.target.value as UserRole }))}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                  >
+                    <option value="employee">Employee</option>
+                    <option value="team_leader">Team Leader / Admin</option>
+                    <option value="super_admin">Super Admin</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">Department *</label>
+                  <select
+                    value={newEmp.department}
+                    onChange={(e) => setNewEmp((p) => ({ ...p, department: e.target.value }))}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                  >
+                    {departments.map((d) => (
+                      <option key={d.id} value={d.name}>
+                        {d.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">Designation *</label>
+                  <input
+                    required
+                    value={newEmp.designation}
+                    onChange={(e) => setNewEmp((p) => ({ ...p, designation: e.target.value }))}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                  />
+                </div>
+              </div>
+
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium mb-1">Joining Date *</label>
+                  <input
+                    type="date"
+                    required
+                    value={newEmp.joiningDate}
+                    onChange={(e) => {
+                      const nextJoin = e.target.value;
+                      const opening = computeOpeningBalances(nextJoin, newEmp.timezone);
+                      setNewEmp((p) => ({
+                        ...p,
+                        joiningDate: nextJoin,
+                        ...(leaveManualOverride
+                          ? {}
+                          : {
+                              sickLeaveBalance: opening.sickLeaveBalance,
+                              casualLeaveBalance: opening.casualLeaveBalance,
+                              carryForwardBalance: opening.carryForwardBalance,
+                            }),
+                      }));
+                    }}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">Reporting Manager</label>
+                  <select
+                    value={newEmp.managerUid}
+                    onChange={(e) => setNewEmp((p) => ({ ...p, managerUid: e.target.value }))}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                  >
+                    <option value="">None assigned</option>
+                    {leaders.map((l) => (
+                      <option key={l.id} value={l.uid || l.id}>
+                        {l.fullName} ({l.role})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {(() => {
+                const preview = computeOpeningBalances(newEmp.joiningDate, newEmp.timezone);
+                return (
+                  <div className="p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-950/60 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                      <span className="text-zinc-600 dark:text-zinc-300 font-mono tabular-nums">
+                        Policy Calc ({newEmp.joiningDate}): SL {preview.sickLeaveBalance}d · CL {preview.casualLeaveBalance}d · CL Eligible:{' '}
+                        {preview.clEligibilityDate} ({preview.isClEligible ? 'Eligible' : 'Waiting 6m'})
+                      </span>
+                      {leaveManualOverride && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setLeaveManualOverride(false);
+                            setNewEmp((p) => ({
+                              ...p,
+                              sickLeaveBalance: preview.sickLeaveBalance,
+                              casualLeaveBalance: preview.casualLeaveBalance,
+                              carryForwardBalance: preview.carryForwardBalance,
+                            }));
+                          }}
+                          className="text-[#B5121B] dark:text-red-400 font-medium underline"
+                        >
+                          Recalculate from Policy
+                        </button>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <label className="block font-medium mb-1">Sick Leave (SL)</label>
+                        <input
+                          type="number"
+                          step="0.5"
+                          value={newEmp.sickLeaveBalance}
+                          onChange={(e) => {
+                            setLeaveManualOverride(true);
+                            setNewEmp((p) => ({ ...p, sickLeaveBalance: Number(e.target.value) }));
+                          }}
+                          className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-medium mb-1">Casual Leave (CL)</label>
+                        <input
+                          type="number"
+                          step="0.5"
+                          value={newEmp.casualLeaveBalance}
+                          onChange={(e) => {
+                            setLeaveManualOverride(true);
+                            setNewEmp((p) => ({ ...p, casualLeaveBalance: Number(e.target.value) }));
+                          }}
+                          className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-medium mb-1">Carry Forward</label>
+                        <input
+                          type="number"
+                          step="0.5"
+                          value={newEmp.carryForwardBalance}
+                          onChange={(e) => {
+                            setLeaveManualOverride(true);
+                            setNewEmp((p) => ({ ...p, carryForwardBalance: Number(e.target.value) }));
+                          }}
+                          className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Optional Per-Employee Schedule */}
+              <div className="p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 space-y-3">
+                <label className="flex items-center justify-between cursor-pointer">
+                  <span className="font-medium">Customize Working Hours &amp; Days for this Employee</span>
+                  <input
+                    type="checkbox"
+                    checked={createCustomSchedule}
+                    onChange={(e) => setCreateCustomSchedule(e.target.checked)}
+                    className="accent-[#B5121B]"
+                  />
+                </label>
+                {createCustomSchedule && (
+                  <div className="space-y-3 pt-2 border-t border-zinc-200 dark:border-zinc-800">
+                    <div className="grid grid-cols-3 gap-2.5">
+                      <div>
+                        <label className="block mb-1">Start Time</label>
+                        <input
+                          type="time"
+                          value={newEmp.officeStartTime}
+                          onChange={(e) => setNewEmp((p) => ({ ...p, officeStartTime: e.target.value }))}
+                          className="w-full min-h-[38px] px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block mb-1">End Time</label>
+                        <input
+                          type="time"
+                          value={newEmp.officeEndTime}
+                          onChange={(e) => setNewEmp((p) => ({ ...p, officeEndTime: e.target.value }))}
+                          className="w-full min-h-[38px] px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block mb-1">Grace (min)</label>
+                        <input
+                          type="number"
+                          value={newEmp.gracePeriodMinutes}
+                          onChange={(e) => setNewEmp((p) => ({ ...p, gracePeriodMinutes: Number(e.target.value) }))}
+                          className="w-full min-h-[38px] px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {WEEKDAYS.map((w) => {
+                        const active = newEmp.workingDays.includes(w.day);
+                        return (
+                          <button
+                            type="button"
+                            key={w.day}
+                            onClick={() =>
+                              setNewEmp((p) => ({
+                                ...p,
+                                workingDays: active
+                                  ? p.workingDays.filter((d) => d !== w.day)
+                                  : [...p.workingDays, w.day].sort(),
+                              }))
+                            }
+                            className={`px-3 py-1.5 rounded-lg border text-[11px] font-medium ${
+                              active
+                                ? 'bg-black text-white dark:bg-white dark:text-black border-black dark:border-white'
+                                : 'border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300'
+                            }`}
+                          >
+                            {w.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <label className="font-medium">Temporary Password</label>
+                  <button
+                    type="button"
+                    onClick={() => setNewEmp((p) => ({ ...p, temporaryPassword: generateTempPassword() }))}
+                    className="inline-flex items-center gap-1 text-[#B5121B] dark:text-red-400 font-medium"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    Generate
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={newEmp.temporaryPassword}
+                  onChange={(e) => setNewEmp((p) => ({ ...p, temporaryPassword: e.target.value }))}
+                  className="w-full min-h-[38px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
+                />
+                <label className="flex items-center gap-2 text-zinc-600 dark:text-zinc-300">
+                  <input
+                    type="checkbox"
+                    checked={newEmp.mustChangePassword}
+                    onChange={(e) => setNewEmp((p) => ({ ...p, mustChangePassword: e.target.checked }))}
+                    className="accent-[#B5121B]"
+                  />
+                  Require password change on first login
+                </label>
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-zinc-200 dark:border-zinc-800 flex gap-3">
+              <button
+                type="button"
+                onClick={() => setCreateOpen(false)}
+                className="flex-1 min-h-[44px] rounded-xl border border-zinc-200 dark:border-zinc-700 text-xs font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={creating}
+                className="flex-1 min-h-[44px] rounded-xl bg-[#B5121B] hover:bg-[#960E16] text-white text-xs font-semibold disabled:opacity-50"
+              >
+                {creating ? 'Creating Account...' : 'Create Employee'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Employee Profile Inspector Drawer */}
+      {selectedEmp && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-end">
+          <div className="w-full max-w-2xl h-full bg-white dark:bg-zinc-900 border-l border-zinc-200 dark:border-zinc-800 flex flex-col shadow-2xl">
+            <div className="px-6 py-4 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                {photoUrls[selectedEmp.id] ? (
+                  <img
+                    src={photoUrls[selectedEmp.id]}
+                    alt={selectedEmp.fullName}
+                    className="w-11 h-11 rounded-full object-cover border border-zinc-200 dark:border-zinc-700 shrink-0"
+                  />
+                ) : (
+                  <div className="w-11 h-11 rounded-full bg-black text-white flex items-center justify-center text-sm font-semibold shrink-0">
+                    {getInitials(selectedEmp.fullName)}
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <h3 className="text-base font-semibold truncate">{selectedEmp.fullName}</h3>
+                  <p className="text-xs text-zinc-500 truncate">
+                    {selectedEmp.employeeCode} · {selectedEmp.designation} · {selectedEmp.location || 'India'}
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => setSelectedEmp(null)} className="min-h-[40px] min-w-[40px] flex items-center justify-center text-zinc-500">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Tabs */}
+            <div className="px-6 py-2.5 border-b border-zinc-200 dark:border-zinc-800 flex items-center gap-2 overflow-x-auto">
+              {(['profile', 'attendance', 'leave', ...(canViewSalary ? ['payroll'] : [])] as const).map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setProfileTab(tab as typeof profileTab)}
+                  className={`px-3.5 py-1.5 rounded-lg text-xs font-medium capitalize whitespace-nowrap ${
+                    profileTab === tab
+                      ? 'bg-black dark:bg-white text-white dark:text-black'
+                      : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6 space-y-5 text-xs">
+              {profileTab === 'profile' && (
+                <form onSubmit={handleSaveProfile} className="space-y-4">
+                  {isSuperAdmin && (
+                    <div className="flex items-center justify-between p-3 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800">
+                      <div>
+                        <div className="font-medium">Profile Photograph</div>
+                        <div className="text-[11px] text-zinc-500">Stored securely for employee identification</div>
+                      </div>
+                      <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 cursor-pointer font-medium">
+                        <Upload className="w-3.5 h-3.5" />
+                        {uploadingPhoto ? 'Uploading...' : 'Change Photo'}
+                        <input
+                          type="file"
+                          accept="image/*"
+                          disabled={uploadingPhoto}
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f) handleProfilePhotoUpload(f);
+                          }}
+                        />
+                      </label>
+                    </div>
+                  )}
+
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-medium mb-1">Full Name</label>
+                      <input
+                        disabled={!isSuperAdmin}
+                        value={editForm.fullName || ''}
+                        onChange={(e) => setEditForm((p) => ({ ...p, fullName: e.target.value }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 disabled:opacity-70"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-medium mb-1">Employment Status</label>
+                      <select
+                        disabled={!isSuperAdmin}
+                        value={editForm.status || 'Active'}
+                        onChange={(e) => setEditForm((p) => ({ ...p, status: e.target.value as EmployeeStatus }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 disabled:opacity-70"
+                      >
+                        <option value="Active">Active</option>
+                        <option value="Inactive">Inactive</option>
+                        <option value="Resigned">Resigned</option>
+                        <option value="Terminated">Terminated</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block font-medium mb-1">Joining Date</label>
+                      <input
+                        type="date"
+                        disabled={!isSuperAdmin}
+                        value={editForm.joiningDate || ''}
+                        onChange={(e) => setEditForm((p) => ({ ...p, joiningDate: e.target.value }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 disabled:opacity-70 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-medium mb-1">Phone</label>
+                      <input
+                        disabled={!isSuperAdmin}
+                        value={editForm.phone || ''}
+                        onChange={(e) => setEditForm((p) => ({ ...p, phone: e.target.value }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 disabled:opacity-70"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-medium mb-1">Emergency Contact</label>
+                      <input
+                        disabled={!isSuperAdmin}
+                        value={editForm.emergencyContact || ''}
+                        onChange={(e) => setEditForm((p) => ({ ...p, emergencyContact: e.target.value }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 disabled:opacity-70"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Location, Timezone, Currency */}
+                  <div className="grid sm:grid-cols-3 gap-3 p-3 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800">
+                    <div>
+                      <label className="block font-medium mb-1">Location</label>
+                      <select
+                        disabled={!isSuperAdmin}
+                        value={editForm.location || 'India'}
+                        onChange={(e) => handleEditLocationChange(e.target.value)}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 disabled:opacity-70"
+                      >
+                        {availableLocations.map((loc) => (
+                          <option key={loc} value={loc}>
+                            {loc}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block font-medium mb-1">Timezone</label>
+                      <select
+                        disabled={!isSuperAdmin}
+                        value={editForm.timezone || 'Asia/Kolkata'}
+                        onChange={(e) => setEditForm((p) => ({ ...p, timezone: e.target.value }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono disabled:opacity-70"
+                      >
+                        {TIMEZONES.map((tz) => (
+                          <option key={tz} value={tz}>
+                            {tz}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block font-medium mb-1">Salary Currency</label>
+                      <select
+                        disabled={!isSuperAdmin}
+                        value={editForm.currency || 'INR'}
+                        onChange={(e) => setEditForm((p) => ({ ...p, currency: e.target.value }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono disabled:opacity-70"
+                      >
+                        <option value="INR">INR (₹)</option>
+                        <option value="AED">AED (د.إ)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block font-medium mb-1">Role</label>
+                      <select
+                        disabled={!isSuperAdmin}
+                        value={editForm.role || 'employee'}
+                        onChange={(e) => setEditForm((p) => ({ ...p, role: e.target.value as UserRole }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 disabled:opacity-70"
+                      >
+                        <option value="employee">Employee</option>
+                        <option value="team_leader">Team Leader</option>
+                        <option value="super_admin">Super Admin</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block font-medium mb-1">Department</label>
+                      <select
+                        disabled={!isSuperAdmin}
+                        value={editForm.department || ''}
+                        onChange={(e) => setEditForm((p) => ({ ...p, department: e.target.value }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 disabled:opacity-70"
+                      >
+                        {departments.map((d) => (
+                          <option key={d.id} value={d.name}>
+                            {d.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block font-medium mb-1">Designation</label>
+                      <input
+                        disabled={!isSuperAdmin}
+                        value={editForm.designation || ''}
+                        onChange={(e) => setEditForm((p) => ({ ...p, designation: e.target.value }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 disabled:opacity-70"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Individual Working Hours Override */}
+                  <div className="p-3.5 rounded-xl border border-zinc-200 dark:border-zinc-800 space-y-3">
+                    <label className="flex items-center justify-between cursor-pointer">
+                      <div>
+                        <div className="font-medium">Individual Schedule Override</div>
+                        <div className="text-[11px] text-zinc-500">
+                          {editCustomSchedule
+                            ? 'Using employee-specific shift hours and working days'
+                            : `Inherits company defaults (${settings.officeStartTime}–${settings.officeEndTime})`}
+                        </div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        disabled={!isSuperAdmin}
+                        checked={editCustomSchedule}
+                        onChange={(e) => setEditCustomSchedule(e.target.checked)}
+                        className="accent-[#B5121B]"
+                      />
+                    </label>
+
+                    {editCustomSchedule && (
+                      <div className="space-y-3 pt-2 border-t border-zinc-200 dark:border-zinc-800">
+                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                          <div>
+                            <label className="block mb-1">Start</label>
+                            <input
+                              type="time"
+                              disabled={!isSuperAdmin}
+                              value={editForm.officeStartTime || '09:30'}
+                              onChange={(e) => setEditForm((p) => ({ ...p, officeStartTime: e.target.value }))}
+                              className="w-full min-h-[38px] px-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block mb-1">End</label>
+                            <input
+                              type="time"
+                              disabled={!isSuperAdmin}
+                              value={editForm.officeEndTime || '18:30'}
+                              onChange={(e) => setEditForm((p) => ({ ...p, officeEndTime: e.target.value }))}
+                              className="w-full min-h-[38px] px-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block mb-1">Grace (m)</label>
+                            <input
+                              type="number"
+                              disabled={!isSuperAdmin}
+                              value={editForm.gracePeriodMinutes ?? 15}
+                              onChange={(e) =>
+                                setEditForm((p) => ({ ...p, gracePeriodMinutes: Number(e.target.value) }))
+                              }
+                              className="w-full min-h-[38px] px-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block mb-1">Half (h)</label>
+                            <input
+                              type="number"
+                              step="0.5"
+                              disabled={!isSuperAdmin}
+                              value={editForm.halfDayMinHours ?? 4}
+                              onChange={(e) =>
+                                setEditForm((p) => ({ ...p, halfDayMinHours: Number(e.target.value) }))
+                              }
+                              className="w-full min-h-[38px] px-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block mb-1">Full (h)</label>
+                            <input
+                              type="number"
+                              step="0.5"
+                              disabled={!isSuperAdmin}
+                              value={editForm.fullDayMinHours ?? 8}
+                              onChange={(e) =>
+                                setEditForm((p) => ({ ...p, fullDayMinHours: Number(e.target.value) }))
+                              }
+                              className="w-full min-h-[38px] px-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {WEEKDAYS.map((w) => {
+                            const list = editForm.workingDays || settings.workingDays;
+                            const active = list.includes(w.day);
+                            return (
+                              <button
+                                type="button"
+                                key={w.day}
+                                disabled={!isSuperAdmin}
+                                onClick={() =>
+                                  setEditForm((p) => {
+                                    const cur = p.workingDays || settings.workingDays;
+                                    return {
+                                      ...p,
+                                      workingDays: active
+                                        ? cur.filter((d) => d !== w.day)
+                                        : [...cur, w.day].sort(),
+                                    };
+                                  })
+                                }
+                                className={`px-3 py-1.5 rounded-lg border text-[11px] font-medium ${
+                                  active
+                                    ? 'bg-black text-white dark:bg-white dark:text-black border-black dark:border-white'
+                                    : 'border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300'
+                                }`}
+                              >
+                                {w.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-3 pt-2 border-t border-zinc-200 dark:border-zinc-800">
+                    <div>
+                      <label className="block font-medium mb-1">Sick Leave Balance</label>
+                      <input
+                        type="number"
+                        disabled={!isSuperAdmin}
+                        value={editForm.sickLeaveBalance ?? 0}
+                        onChange={(e) => setEditForm((p) => ({ ...p, sickLeaveBalance: Number(e.target.value) }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-medium mb-1">Casual Leave Balance</label>
+                      <input
+                        type="number"
+                        disabled={!isSuperAdmin}
+                        value={editForm.casualLeaveBalance ?? 0}
+                        onChange={(e) => setEditForm((p) => ({ ...p, casualLeaveBalance: Number(e.target.value) }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-medium mb-1">Carry Forward</label>
+                      <input
+                        type="number"
+                        disabled={!isSuperAdmin}
+                        value={editForm.carryForwardBalance ?? 0}
+                        onChange={(e) => setEditForm((p) => ({ ...p, carryForwardBalance: Number(e.target.value) }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  {isSuperAdmin && (
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-3">
+                      <button
+                        type="button"
+                        onClick={() => handleResetPassword(selectedEmp)}
+                        className="min-h-[42px] px-4 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 inline-flex items-center gap-2 font-medium"
+                      >
+                        <KeyRound className="w-4 h-4" />
+                        Send Password Reset
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={savingEdit}
+                        className="min-h-[42px] px-5 py-2 rounded-xl bg-[#B5121B] hover:bg-[#960E16] text-white font-semibold"
+                      >
+                        {savingEdit ? 'Saving...' : 'Save Changes'}
+                      </button>
+                    </div>
+                  )}
+                </form>
+              )}
+
+              {profileTab === 'attendance' && (
+                <div className="space-y-2">
+                  {empAttendance.length === 0 ? (
+                    <p className="text-zinc-500">No recent attendance records found.</p>
+                  ) : (
+                    empAttendance.map((a) => (
+                      <div key={a.id} className="p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 flex items-center justify-between">
+                        <div>
+                          <div className="font-mono font-semibold">{a.date}</div>
+                          <div className="text-zinc-500">{a.notes || a.timezone || 'Standard log'}</div>
+                        </div>
+                        <span className="font-medium">{a.status}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+
+              {profileTab === 'leave' && (
+                <div className="space-y-4">
+                  {(() => {
+                    const policy = normalizeLeavePolicyConfig(settings.leavePolicy);
+                    const clElig =
+                      selectedEmp.clEligibilityDate ||
+                      calculateCasualLeaveEligibilityDate(
+                        selectedEmp.joiningDate,
+                        policy.casualLeaveEligibilityMonths
+                      );
+                    const empToday = getTodayInTimezone(selectedEmp.timezone || 'Asia/Kolkata');
+                    const isEligible = empToday >= clElig;
+                    return (
+                      <div className="space-y-2.5">
+                        <div className="grid grid-cols-3 gap-2.5">
+                          <div className="p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950">
+                            <div className="text-[11px] text-zinc-500">Sick Leave</div>
+                            <div className="text-lg font-bold font-mono tabular-nums">{selectedEmp.sickLeaveBalance}</div>
+                          </div>
+                          <div className="p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950">
+                            <div className="text-[11px] text-zinc-500">Casual Leave</div>
+                            <div className="text-lg font-bold font-mono tabular-nums">{selectedEmp.casualLeaveBalance}</div>
+                          </div>
+                          <div className="p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950">
+                            <div className="text-[11px] text-zinc-500">Carry Fwd</div>
+                            <div className="text-lg font-bold font-mono tabular-nums">{selectedEmp.carryForwardBalance}</div>
+                          </div>
+                        </div>
+                        <div className="p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 text-[11px] flex flex-wrap items-center justify-between gap-2 font-mono tabular-nums">
+                          <span>Joined: {selectedEmp.joiningDate}</span>
+                          <span>
+                            CL Eligibility: {clElig} ({isEligible ? 'Eligible' : 'Waiting'})
+                          </span>
+                        </div>
+                        {selectedEmp.leaveMigrationNote && (
+                          <div className="p-3 rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 text-[11px]">
+                            {selectedEmp.leaveMigrationNote}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  <div className="space-y-2">
+                    <div className="font-semibold text-zinc-950 dark:text-zinc-100">Accrual &amp; Adjustment Ledger</div>
+                    {empLedger.length === 0 ? (
+                      <p className="text-zinc-500">No accrual ledger entries yet. Open Leave Management to sync policy accruals.</p>
+                    ) : (
+                      <div className="space-y-1.5 max-h-56 overflow-y-auto">
+                        {empLedger.map((entry) => (
+                          <div key={entry.id} className="p-2.5 rounded-lg border border-zinc-200 dark:border-zinc-800 flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="font-medium truncate">
+                                <span className="font-mono">{entry.month}</span> · {entry.leaveType} · {entry.entryType.replace(/_/g, ' ')}
+                              </div>
+                              <div className="text-[11px] text-zinc-500 truncate">{entry.reason}</div>
+                            </div>
+                            <div className="text-right font-mono tabular-nums shrink-0">
+                              <div className={entry.amount >= 0 ? 'text-emerald-700 dark:text-emerald-400 font-semibold' : 'text-[#B5121B] dark:text-red-400 font-semibold'}>
+                                {entry.amount > 0 ? `+${entry.amount}` : entry.amount}
+                              </div>
+                              {typeof entry.balanceAfter === 'number' && (
+                                <div className="text-[10px] text-zinc-500">Bal: {entry.balanceAfter}</div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="font-semibold text-zinc-950 dark:text-zinc-100">Leave Applications</div>
+                    {empLeaves.length === 0 ? (
+                      <p className="text-zinc-500">No leave applications for this employee.</p>
+                    ) : (
+                      empLeaves.map((l) => (
+                        <div key={l.id} className="p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 flex items-center justify-between">
+                          <div>
+                            <div className="font-semibold">
+                              {l.leaveType} · {l.startDate} to {l.endDate} ({l.days}d)
+                            </div>
+                            <div className="text-zinc-500">{l.reason}</div>
+                          </div>
+                          <span className="font-medium">{l.status}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {profileTab === 'payroll' && canViewSalary && (
+                <form onSubmit={handleSaveQuickSalary} className="space-y-4">
+                  <div>
+                    <label className="block font-medium mb-1">Salary Currency</label>
+                    <select
+                      disabled={!isSuperAdmin}
+                      value={salaryForm.currency}
+                      onChange={(e) => setSalaryForm((s) => ({ ...s, currency: e.target.value }))}
+                      className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                    >
+                      <option value="INR">INR (₹)</option>
+                      <option value="AED">AED (د.إ)</option>
+                    </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-medium mb-1">Basic Salary</label>
+                      <input
+                        type="number"
+                        disabled={!isSuperAdmin}
+                        value={salaryForm.basicSalary}
+                        onChange={(e) => setSalaryForm((s) => ({ ...s, basicSalary: Number(e.target.value) }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-medium mb-1">HRA</label>
+                      <input
+                        type="number"
+                        disabled={!isSuperAdmin}
+                        value={salaryForm.hra}
+                        onChange={(e) => setSalaryForm((s) => ({ ...s, hra: Number(e.target.value) }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-medium mb-1">Default Bonus</label>
+                      <input
+                        type="number"
+                        disabled={!isSuperAdmin}
+                        value={salaryForm.defaultBonus}
+                        onChange={(e) => setSalaryForm((s) => ({ ...s, defaultBonus: Number(e.target.value) }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-medium mb-1">Professional Tax / Deductions</label>
+                      <input
+                        type="number"
+                        disabled={!isSuperAdmin}
+                        value={salaryForm.professionalTax}
+                        onChange={(e) => setSalaryForm((s) => ({ ...s, professionalTax: Number(e.target.value) }))}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                      />
+                    </div>
+                  </div>
+                  <div className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 flex items-center justify-between">
+                    <span>Estimated Net Salary</span>
+                    <span className="font-bold font-mono text-sm">
+                      {formatMoney(
+                        salaryForm.basicSalary + salaryForm.hra + salaryForm.defaultBonus - salaryForm.professionalTax,
+                        salaryForm.currency
+                      )}
+                    </span>
+                  </div>
+                  {isSuperAdmin && (
+                    <button
+                      type="submit"
+                      className="min-h-[42px] px-5 py-2 rounded-xl bg-[#B5121B] hover:bg-[#960E16] text-white font-semibold"
+                    >
+                      Save Salary Configuration
+                    </button>
+                  )}
+                </form>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

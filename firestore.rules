@@ -1,0 +1,686 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn() && request.auth.token.email == 'enquiry.revivo@gmail.com';
+    }
+
+    function isSuperAdmin() {
+      return isBootstrappedAdmin() || (
+        isSignedIn() &&
+        exists(/databases/$(database)/documents/roles/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.role == 'super_admin' &&
+        get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.status == 'Active'
+      );
+    }
+
+    function isTeamLeader() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/roles/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.role == 'team_leader' &&
+        get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.status == 'Active';
+    }
+
+    function isActiveEmployee() {
+      return isBootstrappedAdmin() || (
+        isSignedIn() &&
+        exists(/databases/$(database)/documents/roles/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.status == 'Active'
+      );
+    }
+
+    function hasLeaderPermission(permKey) {
+      return isTeamLeader() &&
+        exists(/databases/$(database)/documents/companySettings/main) &&
+        get(/databases/$(database)/documents/companySettings/main).data.teamLeaderPermissions[permKey] == true;
+    }
+
+    function isLeaderOrAdmin() {
+      return isSuperAdmin() || isTeamLeader();
+    }
+
+    function isStringSize(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isOptionalStringSize(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    // --- Validation Blueprints ---
+    function isValidCompanySettings(data) {
+      return data.keys().hasAll([
+          'companyName', 'officeStartTime', 'officeEndTime', 'gracePeriodMinutes',
+          'halfDayMinHours', 'fullDayMinHours', 'workingDays', 'defaultSickLeave',
+          'defaultCasualLeave', 'currency', 'teamLeaderPermissions', 'updatedAt', 'updatedBy'
+        ]) &&
+        data.keys().hasOnly([
+          'companyName', 'companyAddress', 'companyPhone', 'companyEmail', 'companyWebsite',
+          'taxId', 'logoAssetId', 'locations', 'supportedCurrencies',
+          'officeStartTime', 'officeEndTime', 'gracePeriodMinutes',
+          'halfDayMinHours', 'fullDayMinHours', 'workingDays', 'holidays',
+          'defaultSickLeave', 'defaultCasualLeave', 'leavePolicy', 'currency', 'teamLeaderPermissions',
+          'updatedAt', 'updatedBy'
+        ]) &&
+        isStringSize(data.companyName, 1, 120) &&
+        isOptionalStringSize(data, 'companyAddress', 300) &&
+        isOptionalStringSize(data, 'companyPhone', 40) &&
+        isOptionalStringSize(data, 'companyEmail', 120) &&
+        isOptionalStringSize(data, 'companyWebsite', 160) &&
+        isOptionalStringSize(data, 'taxId', 80) &&
+        isOptionalStringSize(data, 'logoAssetId', 128) &&
+        (!( 'locations' in data ) || (data.locations is list && data.locations.size() <= 20)) &&
+        (!( 'supportedCurrencies' in data ) || (data.supportedCurrencies is list && data.supportedCurrencies.size() <= 10)) &&
+        isStringSize(data.officeStartTime, 5, 5) &&
+        isStringSize(data.officeEndTime, 5, 5) &&
+        data.gracePeriodMinutes is number && data.gracePeriodMinutes >= 0 && data.gracePeriodMinutes <= 180 &&
+        data.halfDayMinHours is number && data.halfDayMinHours >= 1 && data.halfDayMinHours <= 12 &&
+        data.fullDayMinHours is number && data.fullDayMinHours >= 1 && data.fullDayMinHours <= 16 &&
+        data.workingDays is list && data.workingDays.size() <= 7 &&
+        (!( 'holidays' in data ) || (data.holidays is list && data.holidays.size() <= 60)) &&
+        data.defaultSickLeave is number && data.defaultSickLeave >= 0 && data.defaultSickLeave <= 100 &&
+        data.defaultCasualLeave is number && data.defaultCasualLeave >= 0 && data.defaultCasualLeave <= 100 &&
+        (!( 'leavePolicy' in data ) || data.leavePolicy is map) &&
+        isStringSize(data.currency, 1, 10) &&
+        data.teamLeaderPermissions is map &&
+        data.updatedAt == request.time &&
+        isStringSize(data.updatedBy, 1, 128);
+    }
+
+    function isValidDepartment(data) {
+      return data.keys().hasAll(['name', 'code', 'createdAt']) &&
+        data.keys().hasOnly(['name', 'code', 'managerUid', 'createdAt']) &&
+        isStringSize(data.name, 1, 80) &&
+        isStringSize(data.code, 1, 20) &&
+        isOptionalStringSize(data, 'managerUid', 128) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidRoleEntry(data) {
+      return data.keys().hasAll(['uid', 'email', 'role', 'employeeId', 'status', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'role', 'employeeId', 'status', 'updatedAt']) &&
+        isStringSize(data.uid, 1, 128) &&
+        isStringSize(data.email, 3, 120) &&
+        data.role in ['super_admin', 'team_leader', 'employee'] &&
+        isStringSize(data.employeeId, 1, 128) &&
+        data.status in ['Active', 'Inactive', 'Resigned', 'Terminated'] &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidEmployee(data) {
+      return data.keys().hasAll([
+          'uid', 'employeeCode', 'fullName', 'email', 'role', 'department',
+          'designation', 'joiningDate', 'status', 'sickLeaveBalance',
+          'casualLeaveBalance', 'carryForwardBalance', 'mustChangePassword',
+          'failedLoginAttempts', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid', 'employeeCode', 'fullName', 'email', 'phone', 'emergencyContact',
+          'role', 'department', 'designation', 'joiningDate', 'status',
+          'location', 'timezone', 'currency',
+          'officeStartTime', 'officeEndTime', 'gracePeriodMinutes',
+          'halfDayMinHours', 'fullDayMinHours', 'workingDays',
+          'managerUid', 'profilePhotoAssetId', 'sickLeaveBalance', 'casualLeaveBalance',
+          'carryForwardBalance', 'leavePolicyMigrated', 'leaveLastSyncedMonth',
+          'leaveLastResetYear', 'clEligibilityDate', 'leaveMigrationNote',
+          'mustChangePassword', 'failedLoginAttempts',
+          'lockedUntil', 'createdAt', 'updatedAt'
+        ]) &&
+        data.uid is string && data.uid.size() <= 128 &&
+        isStringSize(data.employeeCode, 1, 40) &&
+        isStringSize(data.fullName, 1, 120) &&
+        isStringSize(data.email, 3, 120) &&
+        isOptionalStringSize(data, 'phone', 40) &&
+        isOptionalStringSize(data, 'emergencyContact', 120) &&
+        data.role in ['super_admin', 'team_leader', 'employee'] &&
+        isStringSize(data.department, 1, 80) &&
+        isStringSize(data.designation, 1, 80) &&
+        isStringSize(data.joiningDate, 10, 10) &&
+        data.status in ['Active', 'Inactive', 'Resigned', 'Terminated'] &&
+        isOptionalStringSize(data, 'location', 80) &&
+        isOptionalStringSize(data, 'timezone', 80) &&
+        isOptionalStringSize(data, 'currency', 10) &&
+        isOptionalStringSize(data, 'officeStartTime', 5) &&
+        isOptionalStringSize(data, 'officeEndTime', 5) &&
+        (!( 'gracePeriodMinutes' in data ) || (data.gracePeriodMinutes is number && data.gracePeriodMinutes >= 0 && data.gracePeriodMinutes <= 180)) &&
+        (!( 'halfDayMinHours' in data ) || (data.halfDayMinHours is number && data.halfDayMinHours >= 1 && data.halfDayMinHours <= 12)) &&
+        (!( 'fullDayMinHours' in data ) || (data.fullDayMinHours is number && data.fullDayMinHours >= 1 && data.fullDayMinHours <= 16)) &&
+        (!( 'workingDays' in data ) || (data.workingDays is list && data.workingDays.size() <= 7)) &&
+        isOptionalStringSize(data, 'managerUid', 128) &&
+        isOptionalStringSize(data, 'profilePhotoAssetId', 128) &&
+        data.sickLeaveBalance is number && data.sickLeaveBalance >= -60 && data.sickLeaveBalance <= 365 &&
+        data.casualLeaveBalance is number && data.casualLeaveBalance >= -60 && data.casualLeaveBalance <= 365 &&
+        data.carryForwardBalance is number && data.carryForwardBalance >= 0 && data.carryForwardBalance <= 365 &&
+        (!( 'leavePolicyMigrated' in data ) || data.leavePolicyMigrated is bool) &&
+        isOptionalStringSize(data, 'leaveLastSyncedMonth', 7) &&
+        (!( 'leaveLastResetYear' in data ) || (data.leaveLastResetYear is number && data.leaveLastResetYear >= 2000 && data.leaveLastResetYear <= 2100)) &&
+        isOptionalStringSize(data, 'clEligibilityDate', 10) &&
+        isOptionalStringSize(data, 'leaveMigrationNote', 300) &&
+        data.mustChangePassword is bool &&
+        data.failedLoginAttempts is number && data.failedLoginAttempts >= 0 && data.failedLoginAttempts <= 20 &&
+        isOptionalStringSize(data, 'lockedUntil', 40) &&
+        data.createdAt is timestamp &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidEmployeeSalary(data) {
+      return data.keys().hasAll([
+          'employeeId', 'employeeUid', 'basicSalary', 'hra', 'otherEarnings',
+          'deductions', 'professionalTax', 'defaultBonus', 'netSalary', 'updatedAt', 'updatedBy'
+        ]) &&
+        data.keys().hasOnly([
+          'employeeId', 'employeeUid', 'currency', 'basicSalary', 'hra', 'otherEarnings',
+          'deductions', 'professionalTax', 'defaultBonus', 'netSalary', 'updatedAt', 'updatedBy'
+        ]) &&
+        isStringSize(data.employeeId, 1, 128) &&
+        data.employeeUid is string && data.employeeUid.size() <= 128 &&
+        isOptionalStringSize(data, 'currency', 10) &&
+        data.basicSalary is number && data.basicSalary >= 0 &&
+        data.hra is number && data.hra >= 0 &&
+        data.otherEarnings is list && data.otherEarnings.size() <= 15 &&
+        data.deductions is list && data.deductions.size() <= 15 &&
+        data.professionalTax is number && data.professionalTax >= 0 &&
+        data.defaultBonus is number && data.defaultBonus >= 0 &&
+        data.netSalary is number &&
+        data.updatedAt == request.time &&
+        isStringSize(data.updatedBy, 1, 128);
+    }
+
+    function isValidAttendanceRecord(data) {
+      return data.keys().hasAll([
+          'employeeId', 'employeeUid', 'employeeName', 'department', 'date',
+          'workingMinutes', 'status', 'isLate', 'lateByMinutes', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'employeeId', 'employeeUid', 'employeeName', 'department', 'managerUid', 'date', 'timezone',
+          'punchInTime', 'punchInLat', 'punchInLng', 'punchInAccuracy', 'punchInPhotoId',
+          'punchOutTime', 'punchOutLat', 'punchOutLng', 'punchOutAccuracy', 'punchOutPhotoId',
+          'workingMinutes', 'status', 'isLate', 'lateByMinutes', 'notes', 'createdAt', 'updatedAt'
+        ]) &&
+        isStringSize(data.employeeId, 1, 128) &&
+        isStringSize(data.employeeUid, 1, 128) &&
+        isStringSize(data.employeeName, 1, 120) &&
+        isStringSize(data.department, 1, 80) &&
+        isOptionalStringSize(data, 'managerUid', 128) &&
+        isStringSize(data.date, 10, 10) &&
+        isOptionalStringSize(data, 'timezone', 80) &&
+        isOptionalStringSize(data, 'punchInTime', 40) &&
+        (!( 'punchInLat' in data ) || data.punchInLat is number) &&
+        (!( 'punchInLng' in data ) || data.punchInLng is number) &&
+        (!( 'punchInAccuracy' in data ) || data.punchInAccuracy is number) &&
+        isOptionalStringSize(data, 'punchInPhotoId', 128) &&
+        isOptionalStringSize(data, 'punchOutTime', 40) &&
+        (!( 'punchOutLat' in data ) || data.punchOutLat is number) &&
+        (!( 'punchOutLng' in data ) || data.punchOutLng is number) &&
+        (!( 'punchOutAccuracy' in data ) || data.punchOutAccuracy is number) &&
+        isOptionalStringSize(data, 'punchOutPhotoId', 128) &&
+        data.workingMinutes is number && data.workingMinutes >= 0 && data.workingMinutes <= 1440 &&
+        data.status in ['Present', 'Late', 'Half Day', 'Absent', 'Leave', 'Incomplete Attendance', 'Holiday', 'Weekly Off'] &&
+        data.isLate is bool &&
+        data.lateByMinutes is number && data.lateByMinutes >= 0 && data.lateByMinutes <= 1440 &&
+        isOptionalStringSize(data, 'notes', 500) &&
+        data.createdAt is timestamp &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidAttendancePhoto(data) {
+      return data.keys().hasAll([
+          'employeeId', 'employeeUid', 'attendanceRecordId', 'punchType',
+          'date', 'capturedAt', 'mimeType', 'dataUrl'
+        ]) &&
+        data.keys().hasOnly([
+          'employeeId', 'employeeUid', 'managerUid', 'attendanceRecordId', 'punchType',
+          'date', 'capturedAt', 'mimeType', 'dataUrl'
+        ]) &&
+        isStringSize(data.employeeId, 1, 128) &&
+        isStringSize(data.employeeUid, 1, 128) &&
+        isOptionalStringSize(data, 'managerUid', 128) &&
+        isStringSize(data.attendanceRecordId, 1, 160) &&
+        data.punchType in ['in', 'out'] &&
+        isStringSize(data.date, 10, 10) &&
+        data.capturedAt == request.time &&
+        data.mimeType in ['image/jpeg', 'image/png', 'image/webp'] &&
+        isStringSize(data.dataUrl, 30, 750000);
+    }
+
+    function isValidMediaAsset(data) {
+      return data.keys().hasAll(['ownerUid', 'assetType', 'fileName', 'mimeType', 'dataUrl', 'createdAt']) &&
+        data.keys().hasOnly(['ownerUid', 'assetType', 'fileName', 'mimeType', 'dataUrl', 'createdAt']) &&
+        isStringSize(data.ownerUid, 1, 128) &&
+        data.assetType in ['company_logo', 'profile_photo', 'attachment'] &&
+        isStringSize(data.fileName, 1, 160) &&
+        isStringSize(data.mimeType, 3, 80) &&
+        isStringSize(data.dataUrl, 10, 750000) &&
+        data.createdAt == request.time;
+    }
+
+    function isValidAttendanceCorrection(data) {
+      return data.keys().hasAll([
+          'employeeId', 'employeeUid', 'employeeName', 'department', 'date',
+          'attendanceRecordId', 'requestedPunchIn', 'requestedPunchOut', 'reason', 'status', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'employeeId', 'employeeUid', 'employeeName', 'department', 'managerUid', 'date',
+          'attendanceRecordId', 'requestedPunchIn', 'requestedPunchOut', 'reason',
+          'attachmentAssetId', 'status', 'reviewedBy', 'reviewedByName', 'reviewComment', 'reviewedAt', 'createdAt'
+        ]) &&
+        isStringSize(data.employeeId, 1, 128) &&
+        isStringSize(data.employeeUid, 1, 128) &&
+        isStringSize(data.employeeName, 1, 120) &&
+        isStringSize(data.department, 1, 80) &&
+        isOptionalStringSize(data, 'managerUid', 128) &&
+        isStringSize(data.date, 10, 10) &&
+        isStringSize(data.attendanceRecordId, 1, 160) &&
+        isStringSize(data.requestedPunchIn, 5, 5) &&
+        isStringSize(data.requestedPunchOut, 5, 5) &&
+        isStringSize(data.reason, 3, 500) &&
+        isOptionalStringSize(data, 'attachmentAssetId', 128) &&
+        data.status in ['Pending', 'Approved', 'Rejected'] &&
+        isOptionalStringSize(data, 'reviewedBy', 128) &&
+        isOptionalStringSize(data, 'reviewedByName', 120) &&
+        isOptionalStringSize(data, 'reviewComment', 500) &&
+        (!( 'reviewedAt' in data ) || data.reviewedAt is timestamp) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidLeaveApplication(data) {
+      return data.keys().hasAll([
+          'employeeId', 'employeeUid', 'employeeName', 'department', 'leaveType',
+          'startDate', 'endDate', 'days', 'reason', 'status', 'balanceDeducted', 'deductedAmount', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'employeeId', 'employeeUid', 'employeeName', 'department', 'managerUid', 'leaveType',
+          'startDate', 'endDate', 'days', 'reason', 'attachmentAssetId', 'status',
+          'balanceDeducted', 'deductedAmount', 'reviewedBy', 'reviewedByName', 'reviewComment', 'reviewedAt', 'createdAt'
+        ]) &&
+        isStringSize(data.employeeId, 1, 128) &&
+        isStringSize(data.employeeUid, 1, 128) &&
+        isStringSize(data.employeeName, 1, 120) &&
+        isStringSize(data.department, 1, 80) &&
+        isOptionalStringSize(data, 'managerUid', 128) &&
+        data.leaveType in ['SL', 'CL', 'LWP'] &&
+        isStringSize(data.startDate, 10, 10) &&
+        isStringSize(data.endDate, 10, 10) &&
+        data.days is number && data.days > 0 && data.days <= 180 &&
+        isStringSize(data.reason, 3, 500) &&
+        isOptionalStringSize(data, 'attachmentAssetId', 128) &&
+        data.status in ['Pending', 'Approved', 'Rejected', 'Cancelled'] &&
+        data.balanceDeducted is bool &&
+        data.deductedAmount is number && data.deductedAmount >= 0 && data.deductedAmount <= 180 &&
+        isOptionalStringSize(data, 'reviewedBy', 128) &&
+        isOptionalStringSize(data, 'reviewedByName', 120) &&
+        isOptionalStringSize(data, 'reviewComment', 500) &&
+        (!( 'reviewedAt' in data ) || data.reviewedAt is timestamp) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidLeaveLedgerEntry(data) {
+      return data.keys().hasAll([
+          'employeeId', 'employeeUid', 'employeeEmail', 'employeeName', 'leaveType',
+          'entryType', 'month', 'year', 'amount', 'source', 'reason', 'createdBy',
+          'createdByName', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'employeeId', 'employeeUid', 'employeeEmail', 'employeeName', 'leaveType',
+          'entryType', 'month', 'year', 'amount', 'balanceAfter', 'source',
+          'referenceId', 'reason', 'createdBy', 'createdByName', 'createdAt'
+        ]) &&
+        isStringSize(data.employeeId, 1, 128) &&
+        data.employeeUid is string && data.employeeUid.size() <= 128 &&
+        isStringSize(data.employeeEmail, 3, 120) &&
+        isStringSize(data.employeeName, 1, 120) &&
+        data.leaveType in ['SL', 'CL', 'LWP'] &&
+        data.entryType in ['monthly_accrual', 'year_reset', 'carry_forward', 'approved_deduction', 'leave_reversal', 'admin_adjustment', 'migration_baseline'] &&
+        isStringSize(data.month, 7, 7) &&
+        data.year is number && data.year >= 2000 && data.year <= 2100 &&
+        data.amount is number && data.amount >= -365 && data.amount <= 365 &&
+        (!( 'balanceAfter' in data ) || (data.balanceAfter is number && data.balanceAfter >= -365 && data.balanceAfter <= 365)) &&
+        data.source in ['accrual_engine', 'annual_cycle', 'leave_approval', 'leave_reversal', 'admin_manual', 'legacy_migration'] &&
+        isOptionalStringSize(data, 'referenceId', 160) &&
+        isStringSize(data.reason, 1, 500) &&
+        isStringSize(data.createdBy, 1, 128) &&
+        data.createdBy == request.auth.uid &&
+        isStringSize(data.createdByName, 1, 120) &&
+        data.createdAt == request.time;
+    }
+
+    function isValidPayrollRecord(data) {
+      return data.keys().hasAll([
+          'employeeId', 'employeeUid', 'employeeName', 'employeeCode', 'designation',
+          'department', 'month', 'basicSalary', 'hra', 'otherEarnings', 'bonus',
+          'deductions', 'professionalTax', 'grossEarnings', 'totalDeductions', 'netSalary',
+          'workingDaysInMonth', 'presentDays', 'leaveDays', 'status', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'employeeId', 'employeeUid', 'employeeName', 'employeeCode', 'designation',
+          'department', 'location', 'currency', 'month', 'basicSalary', 'hra', 'otherEarnings', 'bonus',
+          'deductions', 'professionalTax', 'grossEarnings', 'totalDeductions', 'netSalary',
+          'workingDaysInMonth', 'presentDays', 'leaveDays', 'status', 'notes',
+          'createdBy', 'createdAt', 'updatedAt', 'publishedAt'
+        ]) &&
+        isStringSize(data.employeeId, 1, 128) &&
+        data.employeeUid is string && data.employeeUid.size() <= 128 &&
+        isStringSize(data.employeeName, 1, 120) &&
+        isStringSize(data.employeeCode, 1, 40) &&
+        isStringSize(data.designation, 1, 80) &&
+        isStringSize(data.department, 1, 80) &&
+        isOptionalStringSize(data, 'location', 80) &&
+        isOptionalStringSize(data, 'currency', 10) &&
+        isStringSize(data.month, 7, 7) &&
+        data.basicSalary is number && data.basicSalary >= 0 &&
+        data.hra is number && data.hra >= 0 &&
+        data.otherEarnings is list && data.otherEarnings.size() <= 15 &&
+        data.bonus is number && data.bonus >= 0 &&
+        data.deductions is list && data.deductions.size() <= 15 &&
+        data.professionalTax is number && data.professionalTax >= 0 &&
+        data.grossEarnings is number && data.grossEarnings >= 0 &&
+        data.totalDeductions is number && data.totalDeductions >= 0 &&
+        data.netSalary is number &&
+        data.workingDaysInMonth is number && data.workingDaysInMonth >= 0 && data.workingDaysInMonth <= 31 &&
+        data.presentDays is number && data.presentDays >= 0 && data.presentDays <= 31 &&
+        data.leaveDays is number && data.leaveDays >= 0 && data.leaveDays <= 31 &&
+        data.status in ['Draft', 'Finalized', 'Published'] &&
+        isOptionalStringSize(data, 'notes', 500) &&
+        isStringSize(data.createdBy, 1, 128) &&
+        data.createdAt is timestamp &&
+        data.updatedAt == request.time &&
+        (!( 'publishedAt' in data ) || data.publishedAt is timestamp);
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll([
+          'actorUid', 'actorName', 'actorRole', 'action', 'entityType', 'entityId', 'summary', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'actorUid', 'actorName', 'actorRole', 'action', 'entityType', 'entityId',
+          'previousValues', 'updatedValues', 'summary', 'createdAt'
+        ]) &&
+        isStringSize(data.actorUid, 1, 128) &&
+        data.actorUid == request.auth.uid &&
+        isStringSize(data.actorName, 1, 120) &&
+        isStringSize(data.actorRole, 1, 40) &&
+        isStringSize(data.action, 1, 80) &&
+        isStringSize(data.entityType, 1, 60) &&
+        isStringSize(data.entityId, 1, 160) &&
+        (!( 'previousValues' in data ) || data.previousValues is map) &&
+        (!( 'updatedValues' in data ) || data.updatedValues is map) &&
+        isStringSize(data.summary, 1, 500) &&
+        data.createdAt == request.time;
+    }
+
+    // --- Collection Rules ---
+
+    match /test/{docId} {
+      allow get: if isSignedIn();
+    }
+
+    match /companySettings/{settingId} {
+      allow get: if isSignedIn() && isValidId(settingId);
+      allow list: if isSuperAdmin();
+      allow create, update: if isSuperAdmin() && isValidId(settingId) && isValidCompanySettings(incoming());
+      allow delete: if false;
+    }
+
+    match /departments/{deptId} {
+      allow get: if isSignedIn() && isValidId(deptId);
+      allow list: if isActiveEmployee();
+      allow create: if isSuperAdmin() && isValidId(deptId) && isValidDepartment(incoming()) && incoming().createdAt == request.time;
+      allow update: if isSuperAdmin() && isValidId(deptId) && isValidDepartment(incoming()) && incoming().createdAt == existing().createdAt;
+      allow delete: if isSuperAdmin() && isValidId(deptId);
+    }
+
+    match /roles/{uid} {
+      allow get: if isSignedIn() && isValidId(uid) && (request.auth.uid == uid || isSuperAdmin());
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(uid) && isValidRoleEntry(incoming()) && (
+        isSuperAdmin() ||
+        (isBootstrappedAdmin() && uid == request.auth.uid && incoming().role == 'super_admin') ||
+        (isSignedIn() && uid == request.auth.uid &&
+          exists(/databases/$(database)/documents/employees/$(incoming().employeeId)) &&
+          get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.email == request.auth.token.email &&
+          get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.role == incoming().role &&
+          get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.status == incoming().status)
+      );
+      allow update: if isValidId(uid) && isValidRoleEntry(incoming()) && (
+        isSuperAdmin() ||
+        (isBootstrappedAdmin() && uid == request.auth.uid && incoming().role == 'super_admin')
+      );
+      allow delete: if isSuperAdmin() && isValidId(uid);
+    }
+
+    match /employees/{employeeId} {
+      allow get: if isSignedIn() && isValidId(employeeId) && (
+        isSuperAdmin() ||
+        existing().uid == request.auth.uid ||
+        existing().email == request.auth.token.email ||
+        (isTeamLeader() && (existing().managerUid == request.auth.uid || hasLeaderPermission('canViewAllEmployees')))
+      );
+      allow list: if isSignedIn() && (
+        isBootstrappedAdmin() ||
+        resource.data.uid == request.auth.uid ||
+        resource.data.email == request.auth.token.email ||
+        resource.data.managerUid == request.auth.uid ||
+        isSuperAdmin() ||
+        hasLeaderPermission('canViewAllEmployees')
+      );
+      allow create: if isValidId(employeeId) && isValidEmployee(incoming()) && incoming().createdAt == request.time && (
+        isSuperAdmin() ||
+        (isBootstrappedAdmin() && incoming().email == request.auth.token.email && incoming().role == 'super_admin')
+      );
+      allow update: if isValidId(employeeId) && isValidEmployee(incoming()) && incoming().createdAt == existing().createdAt && (
+        isSuperAdmin() ||
+        (hasLeaderPermission('canApproveLeaves') &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['sickLeaveBalance', 'casualLeaveBalance', 'carryForwardBalance', 'updatedAt'])) ||
+        (isSignedIn() && existing().email == request.auth.token.email && (existing().uid == '' || existing().uid == request.auth.uid) &&
+          incoming().uid == request.auth.uid &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['uid', 'mustChangePassword', 'failedLoginAttempts', 'lockedUntil', 'updatedAt'])) ||
+        (isActiveEmployee() && existing().uid == request.auth.uid &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['phone', 'emergencyContact', 'profilePhotoAssetId', 'mustChangePassword', 'updatedAt']))
+      );
+      allow delete: if isSuperAdmin() && isValidId(employeeId);
+    }
+
+    match /employeeSalaries/{employeeId} {
+      allow get: if isValidId(employeeId) && (isSuperAdmin() || hasLeaderPermission('canViewSalary'));
+      allow list: if isSuperAdmin() || hasLeaderPermission('canViewSalary');
+      allow create, update: if isValidId(employeeId) && isSuperAdmin() && isValidEmployeeSalary(incoming());
+      allow delete: if isValidId(employeeId) && isSuperAdmin();
+    }
+
+    match /attendanceRecords/{recordId} {
+      allow get: if isSignedIn() && isValidId(recordId) && (
+        isSuperAdmin() ||
+        existing().employeeUid == request.auth.uid ||
+        (isTeamLeader() && (existing().managerUid == request.auth.uid || hasLeaderPermission('canViewAllEmployees')))
+      );
+      allow list: if isSignedIn() && (
+        isBootstrappedAdmin() ||
+        resource.data.employeeUid == request.auth.uid ||
+        resource.data.managerUid == request.auth.uid ||
+        isSuperAdmin() ||
+        hasLeaderPermission('canViewAllEmployees')
+      );
+      allow create: if isValidId(recordId) && isValidAttendanceRecord(incoming()) && incoming().createdAt == request.time && (
+        isSuperAdmin() ||
+        hasLeaderPermission('canEditAttendance') ||
+        (isActiveEmployee() && incoming().employeeUid == request.auth.uid)
+      );
+      allow update: if isValidId(recordId) && isValidAttendanceRecord(incoming()) && incoming().createdAt == existing().createdAt && (
+        isSuperAdmin() ||
+        hasLeaderPermission('canEditAttendance') ||
+        hasLeaderPermission('canApproveCorrections') ||
+        (isActiveEmployee() && existing().employeeUid == request.auth.uid &&
+          (!( 'punchOutTime' in existing() ) || existing().punchOutTime == '') &&
+          incoming().employeeUid == existing().employeeUid &&
+          incoming().employeeId == existing().employeeId &&
+          incoming().date == existing().date &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'punchOutTime', 'punchOutLat', 'punchOutLng', 'punchOutAccuracy',
+            'punchOutPhotoId', 'workingMinutes', 'status', 'updatedAt'
+          ]))
+      );
+      allow delete: if isSuperAdmin() && isValidId(recordId);
+    }
+
+    match /attendancePhotos/{photoId} {
+      allow get: if isSignedIn() && isValidId(photoId) && (
+        isSuperAdmin() ||
+        existing().employeeUid == request.auth.uid ||
+        isTeamLeader()
+      );
+      allow list: if isSignedIn() && (
+        isBootstrappedAdmin() ||
+        resource.data.employeeUid == request.auth.uid ||
+        isSuperAdmin() ||
+        isTeamLeader()
+      );
+      allow create: if isValidId(photoId) && isValidAttendancePhoto(incoming()) && isActiveEmployee() &&
+        (incoming().employeeUid == request.auth.uid || isSuperAdmin());
+      allow update: if false;
+      allow delete: if isSuperAdmin() && isValidId(photoId);
+    }
+
+    match /mediaAssets/{assetId} {
+      allow get: if isSignedIn() && isValidId(assetId) && (
+        existing().assetType == 'company_logo' ||
+        existing().assetType == 'profile_photo' ||
+        existing().ownerUid == request.auth.uid ||
+        isLeaderOrAdmin()
+      );
+      allow list: if isSignedIn() && (
+        isBootstrappedAdmin() ||
+        resource.data.ownerUid == request.auth.uid ||
+        resource.data.assetType == 'company_logo' ||
+        isLeaderOrAdmin()
+      );
+      allow create: if isValidId(assetId) && isValidMediaAsset(incoming()) && isActiveEmployee() &&
+        (incoming().ownerUid == request.auth.uid || isSuperAdmin());
+      allow update: if false;
+      allow delete: if isValidId(assetId) && (isSuperAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+    }
+
+    match /attendanceCorrections/{correctionId} {
+      allow get: if isSignedIn() && isValidId(correctionId) && (
+        isSuperAdmin() || isTeamLeader() || existing().employeeUid == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        isBootstrappedAdmin() ||
+        resource.data.employeeUid == request.auth.uid ||
+        resource.data.managerUid == request.auth.uid ||
+        isSuperAdmin() ||
+        isTeamLeader()
+      );
+      allow create: if isValidId(correctionId) && isValidAttendanceCorrection(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().status == 'Pending' &&
+        isActiveEmployee() &&
+        incoming().employeeUid == request.auth.uid;
+      allow update: if isValidId(correctionId) && isValidAttendanceCorrection(incoming()) &&
+        incoming().createdAt == existing().createdAt && (
+        isSuperAdmin() ||
+        (hasLeaderPermission('canApproveCorrections') && existing().status == 'Pending' && incoming().status in ['Approved', 'Rejected'] &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'reviewedBy', 'reviewedByName', 'reviewComment', 'reviewedAt']))
+      );
+      allow delete: if isSuperAdmin() && isValidId(correctionId);
+    }
+
+    match /leaveApplications/{leaveId} {
+      allow get: if isSignedIn() && isValidId(leaveId) && (
+        isSuperAdmin() || isTeamLeader() || existing().employeeUid == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        isBootstrappedAdmin() ||
+        resource.data.employeeUid == request.auth.uid ||
+        resource.data.managerUid == request.auth.uid ||
+        isSuperAdmin() ||
+        isTeamLeader()
+      );
+      allow create: if isValidId(leaveId) && isValidLeaveApplication(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().status == 'Pending' &&
+        incoming().balanceDeducted == false &&
+        incoming().deductedAmount == 0 &&
+        isActiveEmployee() &&
+        incoming().employeeUid == request.auth.uid;
+      allow update: if isValidId(leaveId) && isValidLeaveApplication(incoming()) &&
+        incoming().createdAt == existing().createdAt && (
+        isSuperAdmin() ||
+        (hasLeaderPermission('canApproveLeaves') && existing().status == 'Pending' && incoming().status in ['Approved', 'Rejected'] &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'balanceDeducted', 'deductedAmount', 'reviewedBy', 'reviewedByName', 'reviewComment', 'reviewedAt'])) ||
+        (isActiveEmployee() && existing().employeeUid == request.auth.uid && existing().status == 'Pending' &&
+          incoming().status == 'Cancelled' &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['status']))
+      );
+      allow delete: if isSuperAdmin() && isValidId(leaveId);
+    }
+
+    match /leaveLedger/{entryId} {
+      allow get: if isSignedIn() && isValidId(entryId) && (
+        isSuperAdmin() ||
+        isTeamLeader() ||
+        existing().employeeUid == request.auth.uid ||
+        existing().employeeEmail == request.auth.token.email
+      );
+      allow list: if isSignedIn() && (
+        isBootstrappedAdmin() ||
+        isSuperAdmin() ||
+        isTeamLeader() ||
+        resource.data.employeeUid == request.auth.uid ||
+        resource.data.employeeEmail == request.auth.token.email
+      );
+      allow create: if isValidId(entryId) && isValidLeaveLedgerEntry(incoming()) &&
+        incoming().createdAt == request.time && (
+          isSuperAdmin() ||
+          (hasLeaderPermission('canApproveLeaves') && incoming().entryType in ['approved_deduction', 'leave_reversal'])
+        );
+      allow update, delete: if false;
+    }
+
+    match /payrollRecords/{payrollId} {
+      allow get: if isSignedIn() && isValidId(payrollId) && (
+        isSuperAdmin() ||
+        hasLeaderPermission('canViewSalary') ||
+        (existing().employeeUid == request.auth.uid && existing().status == 'Published')
+      );
+      allow list: if isSignedIn() && (
+        isBootstrappedAdmin() ||
+        isSuperAdmin() ||
+        hasLeaderPermission('canViewSalary') ||
+        (resource.data.employeeUid == request.auth.uid && resource.data.status == 'Published')
+      );
+      allow create: if isValidId(payrollId) && isSuperAdmin() && isValidPayrollRecord(incoming()) && incoming().createdAt == request.time;
+      allow update: if isValidId(payrollId) && isSuperAdmin() && isValidPayrollRecord(incoming()) && incoming().createdAt == existing().createdAt;
+      allow delete: if isValidId(payrollId) && isSuperAdmin();
+    }
+
+    match /auditLogs/{logId} {
+      allow get: if isValidId(logId) && isSuperAdmin();
+      allow list: if isBootstrappedAdmin() || isSuperAdmin();
+      allow create: if isValidId(logId) && isValidAuditLog(incoming()) && isActiveEmployee();
+      allow update, delete: if false;
+    }
+  }
+}
