@@ -24,6 +24,8 @@
         "defaultSickLeave": { "type": "number" },
         "defaultCasualLeave": { "type": "number" },
         "leavePolicy": { "type": "object" },
+        "celebrationSettings": { "type": "object" },
+        "attendanceReminders": { "type": "object" },
         "currency": { "type": "string", "maxLength": 10 },
         "teamLeaderPermissions": { "type": "object" },
         "updatedAt": { "type": "string", "format": "date-time" },
@@ -86,6 +88,8 @@
         "department": { "type": "string", "minLength": 1, "maxLength": 80 },
         "designation": { "type": "string", "minLength": 1, "maxLength": 80 },
         "joiningDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "dateOfBirth": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "birthdayMonthDay": { "type": "string", "pattern": "^\\d{2}-\\d{2}$" },
         "status": { "type": "string", "enum": ["Active", "Inactive", "Resigned", "Terminated"] },
         "location": { "type": "string", "maxLength": 80 },
         "timezone": { "type": "string", "maxLength": 80 },
@@ -106,6 +110,7 @@
         "leaveLastResetYear": { "type": "number" },
         "clEligibilityDate": { "type": "string", "maxLength": 10 },
         "leaveMigrationNote": { "type": "string", "maxLength": 300 },
+        "reminderPreferences": { "type": "object" },
         "mustChangePassword": { "type": "boolean" },
         "failedLoginAttempts": { "type": "number" },
         "lockedUntil": { "type": "string", "maxLength": 40 },
@@ -243,24 +248,40 @@
     },
     "AttendanceCorrection": {
       "title": "AttendanceCorrection",
-      "description": "Employee request to correct punch-in or punch-out times.",
+      "description": "Employee attendance regularization request to correct missed or inaccurate punch-in/punch-out records.",
       "type": "object",
       "properties": {
         "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
         "employeeUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeCode": { "type": "string", "maxLength": 40 },
         "employeeName": { "type": "string", "minLength": 1, "maxLength": 120 },
         "department": { "type": "string", "minLength": 1, "maxLength": 80 },
         "managerUid": { "type": "string", "maxLength": 128 },
         "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "timezone": { "type": "string", "maxLength": 80 },
         "attendanceRecordId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "requestedPunchIn": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
-        "requestedPunchOut": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
+        "requestType": {
+          "type": "string",
+          "enum": ["missed_punch_in", "missed_punch_out", "both_missed", "incorrect_punch", "other_discrepancy"]
+        },
+        "requestedPunchIn": { "type": "string", "pattern": "^(?:([01]\\d|2[0-3]):[0-5]\\d)?$" },
+        "requestedPunchOut": { "type": "string", "pattern": "^(?:([01]\\d|2[0-3]):[0-5]\\d)?$" },
+        "originalPunchInTime": { "type": "string", "maxLength": 40 },
+        "originalPunchOutTime": { "type": "string", "maxLength": 40 },
+        "originalStatus": {
+          "type": "string",
+          "enum": ["Present", "Late", "Half Day", "Absent", "Leave", "Incomplete Attendance", "Holiday", "Weekly Off"]
+        },
+        "originalWorkingMinutes": { "type": "number" },
         "reason": { "type": "string", "minLength": 3, "maxLength": 500 },
         "attachmentAssetId": { "type": "string", "maxLength": 128 },
         "status": { "type": "string", "enum": ["Pending", "Approved", "Rejected"] },
         "reviewedBy": { "type": "string", "maxLength": 128 },
         "reviewedByName": { "type": "string", "maxLength": 120 },
+        "reviewedByRole": { "type": "string", "enum": ["super_admin", "team_leader", "employee"] },
         "reviewComment": { "type": "string", "maxLength": 500 },
+        "appliedChanges": { "type": "object" },
+        "submittedAtIso": { "type": "string", "maxLength": 40 },
         "reviewedAt": { "type": "string", "format": "date-time" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
@@ -275,6 +296,69 @@
         "requestedPunchOut",
         "reason",
         "status",
+        "createdAt"
+      ]
+    },
+    "RegularizationLock": {
+      "title": "RegularizationLock",
+      "description": "Concurrency-safe lock preventing duplicate unresolved attendance regularization requests for the same employee, date, and requestType.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "requestType": {
+          "type": "string",
+          "enum": ["missed_punch_in", "missed_punch_out", "both_missed", "incorrect_punch", "other_discrepancy"]
+        },
+        "correctionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["employeeId", "employeeUid", "date", "requestType", "correctionId", "createdAt"]
+    },
+    "HrNotification": {
+      "title": "HrNotification",
+      "description": "Internal HR workflow notification for attendance regularization submissions, approvals, and rejections.",
+      "type": "object",
+      "properties": {
+        "category": { "type": "string", "enum": ["regularization"] },
+        "eventType": {
+          "type": "string",
+          "enum": ["submitted_confirmation", "submitted_admin", "approved", "rejected"]
+        },
+        "audienceType": { "type": "string", "enum": ["user", "reviewers"] },
+        "targetUid": { "type": "string", "maxLength": 128 },
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeCode": { "type": "string", "maxLength": 40 },
+        "employeeName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "attendanceDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "requestType": {
+          "type": "string",
+          "enum": ["missed_punch_in", "missed_punch_out", "both_missed", "incorrect_punch", "other_discrepancy"]
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 400 },
+        "note": { "type": "string", "maxLength": 500 },
+        "actorUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "actorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "category",
+        "eventType",
+        "audienceType",
+        "requestId",
+        "employeeId",
+        "employeeName",
+        "department",
+        "attendanceDate",
+        "requestType",
+        "title",
+        "message",
+        "actorUid",
+        "actorName",
         "createdAt"
       ]
     },
@@ -455,6 +539,163 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["actorUid", "actorName", "actorRole", "action", "entityType", "entityId", "summary", "createdAt"]
+    },
+    "CelebrationProfile": {
+      "title": "CelebrationProfile",
+      "description": "Privacy-safe employee celebration projection omitting birth year and confidential HR fields.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "maxLength": 128 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "designation": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "location": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "status": { "type": "string", "enum": ["Active", "Inactive", "Resigned", "Terminated"] },
+        "role": { "type": "string", "enum": ["super_admin", "team_leader", "employee"] },
+        "profilePhotoAssetId": { "type": "string", "maxLength": 128 },
+        "birthdayMonthDay": { "type": "string", "pattern": "^\\d{2}-\\d{2}$" },
+        "joiningDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "employeeId",
+        "employeeUid",
+        "fullName",
+        "department",
+        "designation",
+        "location",
+        "status",
+        "role",
+        "joiningDate",
+        "updatedAt"
+      ]
+    },
+    "CelebrationNotification": {
+      "title": "CelebrationNotification",
+      "description": "Deduplicated birthday or work anniversary celebration notification.",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["birthday", "anniversary"] },
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "maxLength": 128 },
+        "employeeName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "designation": { "type": "string", "maxLength": 80 },
+        "profilePhotoAssetId": { "type": "string", "maxLength": 128 },
+        "celebrationDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "celebrationMonthDay": { "type": "string", "pattern": "^\\d{2}-\\d{2}$" },
+        "year": { "type": "integer" },
+        "yearsCompleted": { "type": "integer" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "audienceScope": { "type": "string", "enum": ["all_active", "department", "leaders_only"] },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "type",
+        "employeeId",
+        "employeeUid",
+        "employeeName",
+        "department",
+        "designation",
+        "celebrationDate",
+        "celebrationMonthDay",
+        "year",
+        "title",
+        "message",
+        "audienceScope",
+        "createdByUid",
+        "createdAt"
+      ]
+    },
+    "NotificationRead": {
+      "title": "NotificationRead",
+      "description": "Per-user notification read receipt.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "notificationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "readAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "notificationId", "readAt"]
+    },
+    "CelebrationWish": {
+      "title": "CelebrationWish",
+      "description": "Colleague birthday or work anniversary wish posted to a celebration event.",
+      "type": "object",
+      "properties": {
+        "notificationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "type": { "type": "string", "enum": ["birthday", "anniversary"] },
+        "recipientEmployeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "recipientName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "authorUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "authorEmployeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "authorDepartment": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "authorPhotoAssetId": { "type": "string", "maxLength": 128 },
+        "emoji": { "type": "string", "enum": ["🎉", "🎂", "👏", "🌟", "💐", "🏆"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 400 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "notificationId",
+        "type",
+        "recipientEmployeeId",
+        "recipientName",
+        "authorUid",
+        "authorEmployeeId",
+        "authorName",
+        "authorDepartment",
+        "emoji",
+        "message",
+        "createdAt"
+      ]
+    },
+    "PushSubscription": {
+      "title": "PushSubscription",
+      "description": "Private Web Push browser/PWA subscription keys owned strictly by the subscribed employee.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "endpoint": { "type": "string", "minLength": 10, "maxLength": 1200 },
+        "keys": { "type": "object" },
+        "expirationTime": { "type": "number" },
+        "deviceLabel": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "status": { "type": "string", "enum": ["active", "expired", "inactive"] },
+        "lastFailureReason": { "type": "string", "maxLength": 300 },
+        "createdAtIso": { "type": "string", "maxLength": 40 },
+        "updatedAtIso": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["employeeId", "employeeUid", "endpoint", "keys", "deviceLabel", "status", "createdAtIso", "updatedAtIso"]
+    },
+    "AttendanceReminderLog": {
+      "title": "AttendanceReminderLog",
+      "description": "Audit and delivery history entry for Smart Attendance Reminders.",
+      "type": "object",
+      "properties": {
+        "dedupKey": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "location": { "type": "string", "maxLength": 80 },
+        "reminderType": { "type": "string", "enum": ["punch_in", "missed_punch_in", "punch_out", "missed_punch_out"] },
+        "attendanceDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "timezone": { "type": "string", "maxLength": 80 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 400 },
+        "url": { "type": "string", "maxLength": 240 },
+        "status": { "type": "string", "enum": ["sent", "failed", "expired", "skipped"] },
+        "reason": { "type": "string", "maxLength": 240 },
+        "subscriptionId": { "type": "string", "maxLength": 128 },
+        "deviceLabel": { "type": "string", "maxLength": 120 },
+        "failureDetail": { "type": "string", "maxLength": 300 },
+        "sentAtIso": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["dedupKey", "employeeId", "employeeUid", "employeeName", "department", "reminderType", "attendanceDate", "title", "body", "status", "sentAtIso"]
     }
   },
   "firestore": {
@@ -509,6 +750,38 @@
     "/auditLogs/{logId}": {
       "schema": { "$ref": "#/entities/AuditLog" },
       "description": "Immutable security and operational audit trail."
+    },
+    "/celebrationProfiles/{employeeId}": {
+      "schema": { "$ref": "#/entities/CelebrationProfile" },
+      "description": "Privacy-safe employee celebration projection without birth years."
+    },
+    "/celebrationNotifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/CelebrationNotification" },
+      "description": "Deduplicated annual birthday and work anniversary notifications."
+    },
+    "/notificationReads/{readId}": {
+      "schema": { "$ref": "#/entities/NotificationRead" },
+      "description": "Per-user celebration notification read receipts."
+    },
+    "/celebrationWishes/{wishId}": {
+      "schema": { "$ref": "#/entities/CelebrationWish" },
+      "description": "Employee wishes on birthday and work anniversary celebrations."
+    },
+    "/regularizationLocks/{lockId}": {
+      "schema": { "$ref": "#/entities/RegularizationLock" },
+      "description": "Pending attendance regularization deduplication locks per employee, date, and request type."
+    },
+    "/hrNotifications/{notifId}": {
+      "schema": { "$ref": "#/entities/HrNotification" },
+      "description": "Attendance regularization workflow notifications for employees and authorized reviewers."
+    },
+    "/pushSubscriptions/{subId}": {
+      "schema": { "$ref": "#/entities/PushSubscription" },
+      "description": "Owner-only Web Push browser/PWA subscriptions."
+    },
+    "/attendanceReminderLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AttendanceReminderLog" },
+      "description": "Smart Attendance Reminders delivery log and audit history."
     }
   }
 }

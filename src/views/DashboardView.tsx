@@ -13,21 +13,23 @@ import {
   ChevronRight,
   Settings,
   BarChart3,
+  BellRing,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useHrNotifications } from '../context/HrNotificationContext';
 import { useToast } from '../components/Toast';
 import { CameraCaptureModal } from '../components/CameraCaptureModal';
+import { CelebrationsWidget } from '../components/CelebrationsWidget';
 import {
   AppPage,
-  AttendanceCorrection,
   AttendanceRecord,
   Employee,
   LeaveApplication,
   PayrollRecord,
+  REGULARIZATION_TYPE_LABELS,
 } from '../types/hr';
 import {
   fetchAllEmployees,
-  fetchAttendanceCorrections,
   fetchAttendanceRecords,
   fetchLeaveApplications,
   fetchPayrollRecords,
@@ -41,6 +43,7 @@ import {
   punchOut,
 } from '../lib/hrService';
 import { calculateCasualLeaveEligibilityDate, normalizeLeavePolicyConfig } from '../../shared/leaveAccrualEngine';
+import { ReminderOverviewMetrics, syncReminderSnapshotToServer } from '../lib/pushService';
 
 interface DashboardViewProps {
   onNavigate: (page: AppPage) => void;
@@ -48,16 +51,23 @@ interface DashboardViewProps {
 
 export function DashboardView({ onNavigate }: DashboardViewProps) {
   const { employee, settings } = useAuth();
+  const {
+    regularizations,
+    pendingRegularizations,
+    pendingRegularizationCount,
+    canReviewRegularizations,
+    refreshRegularizationState,
+  } = useHrNotifications();
   const { showToast } = useToast();
 
   const [loading, setLoading] = useState(true);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
   const [leaves, setLeaves] = useState<LeaveApplication[]>([]);
-  const [corrections, setCorrections] = useState<AttendanceCorrection[]>([]);
   const [payrolls, setPayrolls] = useState<PayrollRecord[]>([]);
   const [punchModal, setPunchModal] = useState<'in' | 'out' | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [reminderOverview, setReminderOverview] = useState<ReminderOverviewMetrics | null>(null);
 
   const schedule = useMemo(() => {
     if (!employee || !settings) return null;
@@ -74,24 +84,34 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
     if (!employee) return;
     setLoading(true);
     try {
-      const [empList, attList, leaveList, corrList, payList] = await Promise.all([
+      const [empList, attList, leaveList, payList] = await Promise.all([
         employee.role === 'employee' ? Promise.resolve([employee]) : fetchAllEmployees(employee),
         fetchAttendanceRecords(employee),
         fetchLeaveApplications(employee),
-        fetchAttendanceCorrections(employee),
         fetchPayrollRecords(employee),
       ]);
       setEmployees(empList);
       setAttendance(attList);
       setLeaves(leaveList);
-      setCorrections(corrList);
       setPayrolls(payList);
+      await refreshRegularizationState();
+      void syncReminderSnapshotToServer({
+        employee,
+        settings,
+        employees: empList,
+        attendanceRecords: attList,
+        approvedLeaves: leaveList,
+      })
+        .then((res) => {
+          if (res.overview) setReminderOverview(res.overview);
+        })
+        .catch(() => {});
     } catch (err: unknown) {
       showToast(err instanceof Error ? err.message : 'Could not load dashboard data', 'error');
     } finally {
       setLoading(false);
     }
-  }, [employee, showToast]);
+  }, [employee, settings, showToast, refreshRegularizationState]);
 
   useEffect(() => {
     loadData();
@@ -115,7 +135,8 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
   ).length;
   const absentTodayCount = Math.max(0, activeEmployees.length - presentTodayCount - onLeaveTodayCount);
   const pendingLeavesCount = leaves.filter((l) => l.status === 'Pending').length;
-  const pendingCorrectionsCount = corrections.filter((c) => c.status === 'Pending').length;
+  const recentlyApprovedRegularizations = regularizations.filter((r) => r.status === 'Approved').slice(0, 3);
+  const recentlyRejectedRegularizations = regularizations.filter((r) => r.status === 'Rejected').slice(0, 3);
 
   const monthPayrolls = payrolls.filter((p) => p.month === currentMonth);
   const publishedMonthCount = monthPayrolls.filter((p) => p.status === 'Published').length;
@@ -312,10 +333,10 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
             <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
               <div className="text-xs text-zinc-500 dark:text-zinc-400">Pending Reviews</div>
               <div className="text-2xl font-bold font-mono tabular-nums mt-1">
-                {pendingLeavesCount + pendingCorrectionsCount}
+                {pendingLeavesCount + pendingRegularizationCount}
               </div>
               <div className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
-                {pendingLeavesCount} leaves · {pendingCorrectionsCount} corrections
+                {pendingLeavesCount} leaves · {pendingRegularizationCount} regularizations
               </div>
             </div>
           </div>
@@ -333,7 +354,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
               onClick={() => onNavigate('attendance')}
               className="min-h-[44px] flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-xs font-medium hover:border-[#B5121B] transition-colors"
             >
-              <span>Corrections ({pendingCorrectionsCount})</span>
+              <span>Regularization ({pendingRegularizationCount})</span>
               <ChevronRight className="w-4 h-4 text-zinc-400" />
             </button>
             <button
@@ -385,8 +406,122 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
               </button>
             </div>
           )}
+          {canReviewRegularizations && (
+            <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-display font-semibold text-zinc-950 dark:text-zinc-100">
+                    Pending Attendance Regularization
+                  </h3>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                    {pendingRegularizationCount === 0
+                      ? 'All attendance regularization requests have been reviewed.'
+                      : `${pendingRegularizationCount} request${pendingRegularizationCount === 1 ? '' : 's'} awaiting approval`}
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl font-bold font-mono tabular-nums text-[#B5121B] dark:text-red-400">
+                    {pendingRegularizationCount}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('attendance')}
+                    className="min-h-[38px] inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-black dark:bg-white text-white dark:text-black text-xs font-semibold hover:opacity-90"
+                  >
+                    <span>Open Approval Queue</span>
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid md:grid-cols-3 gap-4 pt-2 border-t border-zinc-100 dark:border-zinc-800 text-xs">
+                <div className="space-y-1.5">
+                  <div className="font-semibold text-zinc-700 dark:text-zinc-300">
+                    Pending ({pendingRegularizations.length})
+                  </div>
+                  {pendingRegularizations.length === 0 ? (
+                    <p className="text-zinc-500 dark:text-zinc-400">No pending requests.</p>
+                  ) : (
+                    pendingRegularizations.slice(0, 3).map((r) => (
+                      <div key={r.id} className="text-zinc-600 dark:text-zinc-300 truncate">
+                        <span className="font-medium text-zinc-950 dark:text-zinc-100">{r.employeeName}</span>
+                        {' · '}
+                        <span className="font-mono">{r.date}</span>
+                        {' · '}
+                        <span>{r.requestType ? REGULARIZATION_TYPE_LABELS[r.requestType] : 'Regularization'}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="font-semibold text-emerald-700 dark:text-emerald-400">
+                    Recently Approved
+                  </div>
+                  {recentlyApprovedRegularizations.length === 0 ? (
+                    <p className="text-zinc-500 dark:text-zinc-400">No recent approvals.</p>
+                  ) : (
+                    recentlyApprovedRegularizations.map((r) => (
+                      <div key={r.id} className="text-zinc-600 dark:text-zinc-300 truncate">
+                        <span className="font-medium text-zinc-950 dark:text-zinc-100">{r.employeeName}</span>
+                        {' · '}
+                        <span className="font-mono">{r.date}</span>
+                        {r.reviewedByName ? ` · by ${r.reviewedByName}` : ''}
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="font-semibold text-[#B5121B] dark:text-red-400">
+                    Recently Rejected
+                  </div>
+                  {recentlyRejectedRegularizations.length === 0 ? (
+                    <p className="text-zinc-500 dark:text-zinc-400">No recent rejections.</p>
+                  ) : (
+                    recentlyRejectedRegularizations.map((r) => (
+                      <div key={r.id} className="text-zinc-600 dark:text-zinc-300 truncate">
+                        <span className="font-medium text-zinc-950 dark:text-zinc-100">{r.employeeName}</span>
+                        {' · '}
+                        <span className="font-mono">{r.date}</span>
+                        {r.reviewedByName ? ` · by ${r.reviewedByName}` : ''}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+          {employee.role === 'super_admin' && (
+            <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <BellRing className="w-4 h-4 text-[#B5121B]" />
+                  <h3 className="text-sm font-display font-semibold text-zinc-950 dark:text-zinc-100">
+                    Smart Attendance Reminders
+                  </h3>
+                </div>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
+                  {reminderOverview
+                    ? `${reminderOverview.subscribedEmployeesCount} staff subscribed (${reminderOverview.activeDeviceSubscriptions} active devices) · ${reminderOverview.sentToday} sent today · ${reminderOverview.failedToday} failed/expired`
+                    : 'Automated browser push reminders active for shift punch-in and punch-out'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => onNavigate('settings')}
+                className="min-h-[38px] inline-flex items-center gap-1.5 px-4 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 text-xs font-semibold hover:border-[#B5121B] shrink-0"
+              >
+                <span>Configure &amp; View History</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
         </section>
       )}
+
+      {/* CELEBRATIONS WIDGET */}
+      <CelebrationsWidget onNavigate={onNavigate} />
 
       {/* PERSONAL METRICS, CALENDAR, LEAVES & LATEST PAYSLIP */}
       <div className="grid lg:grid-cols-3 gap-6">
@@ -412,7 +547,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 text-xs font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800"
             >
               <FileEdit className="w-3.5 h-3.5" />
-              Request Correction
+              Request Attendance Regularization
             </button>
           </div>
 

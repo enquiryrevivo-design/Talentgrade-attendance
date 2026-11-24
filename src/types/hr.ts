@@ -25,7 +25,44 @@ export type {
   EmployeeLeaveComputedSummary,
 } from '../../shared/leaveAccrualEngine';
 
+export type {
+  CelebrationType,
+  CelebrationVisibilityScope,
+  CelebrationSettings,
+  ComputedCelebrationOccurrence,
+} from '../../shared/celebrationEngine';
+
+export {
+  REGULARIZATION_TYPE_LABELS,
+  REGULARIZATION_REQUEST_TYPES,
+  type RegularizationRequestType,
+  type RegularizedAttendanceStatus,
+} from '../../shared/regularizationEngine';
+
+export {
+  DEFAULT_ATTENDANCE_REMINDER_SETTINGS,
+  DEFAULT_EMPLOYEE_REMINDER_PREFERENCES,
+  REMINDER_TYPE_LABELS,
+  type AttendanceReminderLog,
+  type AttendanceReminderSettings,
+  type EmployeeReminderPreferences,
+  type PushSubscriptionRecord,
+  type PushSubscriptionStatus,
+  type ReminderDeliveryStatus,
+  type ReminderType,
+} from '../../shared/attendanceReminderEngine';
+
 import type { LeavePolicyConfig, LeaveType } from '../../shared/leaveAccrualEngine';
+import type {
+  CelebrationSettings,
+  CelebrationType,
+  CelebrationVisibilityScope,
+} from '../../shared/celebrationEngine';
+import type { RegularizationRequestType } from '../../shared/regularizationEngine';
+import type {
+  AttendanceReminderSettings,
+  EmployeeReminderPreferences,
+} from '../../shared/attendanceReminderEngine';
 
 export type LeaveStatus = 'Pending' | 'Approved' | 'Rejected' | 'Cancelled';
 
@@ -66,6 +103,8 @@ export interface CompanySettings {
   defaultSickLeave: number;
   defaultCasualLeave: number;
   leavePolicy?: LeavePolicyConfig;
+  celebrationSettings?: CelebrationSettings;
+  attendanceReminders?: AttendanceReminderSettings;
   currency: string;
   teamLeaderPermissions: TeamLeaderPermissions;
   updatedAt?: unknown;
@@ -92,6 +131,8 @@ export interface Employee {
   department: string;
   designation: string;
   joiningDate: string; // YYYY-MM-DD
+  dateOfBirth?: string; // YYYY-MM-DD (restricted to Super Admin & owner only)
+  birthdayMonthDay?: string; // MM-DD (privacy-safe)
   status: EmployeeStatus;
   location?: string;
   timezone?: string;
@@ -113,6 +154,7 @@ export interface Employee {
   leaveLastResetYear?: number;
   clEligibilityDate?: string;    // YYYY-MM-DD
   leaveMigrationNote?: string;
+  reminderPreferences?: EmployeeReminderPreferences;
   mustChangePassword: boolean;
   failedLoginAttempts: number;
   lockedUntil?: string;
@@ -192,24 +234,70 @@ export interface MediaAsset {
   createdAt?: unknown;
 }
 
+export interface RegularizationAppliedChanges {
+  punchInTime?: string;
+  punchOutTime?: string;
+  workingMinutes: number;
+  status: AttendanceStatus;
+  isLate: boolean;
+  lateByMinutes: number;
+}
+
 export interface AttendanceCorrection {
   id: string;
   employeeId: string;
   employeeUid: string;
+  employeeCode?: string;
   employeeName: string;
   department: string;
   managerUid?: string;
   date: string;
+  timezone?: string;
   attendanceRecordId: string;
+  requestType?: RegularizationRequestType;
   requestedPunchIn: string;
   requestedPunchOut: string;
+  originalPunchInTime?: string;
+  originalPunchOutTime?: string;
+  originalStatus?: AttendanceStatus;
+  originalWorkingMinutes?: number;
   reason: string;
   attachmentAssetId?: string;
   status: CorrectionStatus;
   reviewedBy?: string;
   reviewedByName?: string;
+  reviewedByRole?: UserRole;
   reviewComment?: string;
+  appliedChanges?: RegularizationAppliedChanges;
+  submittedAtIso?: string;
   reviewedAt?: unknown;
+  createdAt?: unknown;
+}
+
+export type HrNotificationEventType =
+  | 'submitted_confirmation'
+  | 'submitted_admin'
+  | 'approved'
+  | 'rejected';
+
+export interface HrNotification {
+  id: string;
+  category: 'regularization';
+  eventType: HrNotificationEventType;
+  audienceType: 'user' | 'reviewers';
+  targetUid?: string;
+  requestId: string;
+  employeeId: string;
+  employeeCode?: string;
+  employeeName: string;
+  department: string;
+  attendanceDate: string;
+  requestType: RegularizationRequestType;
+  title: string;
+  message: string;
+  note?: string;
+  actorUid: string;
+  actorName: string;
   createdAt?: unknown;
 }
 
@@ -281,11 +369,71 @@ export interface AuditLog {
   createdAt?: unknown;
 }
 
+export interface CelebrationProfile {
+  id: string;
+  employeeId: string;
+  employeeUid: string;
+  fullName: string;
+  department: string;
+  designation: string;
+  location: string;
+  status: EmployeeStatus;
+  role: UserRole;
+  profilePhotoAssetId?: string;
+  birthdayMonthDay?: string; // MM-DD only (never birth year)
+  joiningDate: string; // YYYY-MM-DD
+  updatedAt?: unknown;
+}
+
+export interface CelebrationNotification {
+  id: string;
+  type: CelebrationType;
+  employeeId: string;
+  employeeUid: string;
+  employeeName: string;
+  department: string;
+  designation: string;
+  profilePhotoAssetId?: string;
+  celebrationDate: string; // YYYY-MM-DD
+  celebrationMonthDay: string; // MM-DD
+  year: number;
+  yearsCompleted?: number;
+  title: string;
+  message: string;
+  audienceScope: CelebrationVisibilityScope;
+  createdByUid: string;
+  createdAt?: unknown;
+}
+
+export interface NotificationReadReceipt {
+  id: string;
+  uid: string;
+  notificationId: string;
+  readAt?: unknown;
+}
+
+export interface CelebrationWish {
+  id: string;
+  notificationId: string;
+  type: CelebrationType;
+  recipientEmployeeId: string;
+  recipientName: string;
+  authorUid: string;
+  authorEmployeeId: string;
+  authorName: string;
+  authorDepartment: string;
+  authorPhotoAssetId?: string;
+  emoji: string;
+  message: string;
+  createdAt?: unknown;
+}
+
 export type AppPage =
   | 'dashboard'
   | 'attendance'
   | 'leaves'
   | 'employees'
   | 'payroll'
+  | 'celebrations'
   | 'reports'
   | 'settings';

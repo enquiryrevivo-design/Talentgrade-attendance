@@ -23,3 +23,13 @@
 10. **ID Poisoning**: Creating `/departments/` with a 500-char ID or invalid characters (`dept/../admin`).
 11. **Terminal State Bypass**: Employee modifying an already `Approved` `/leaveApplications/leave1` back to `Pending`.
 12. **Audit Log Tampering**: Any user attempting `update` or `delete` on `/auditLogs/log1`.
+13. **Birth Year / Full DOB Exposure**: Writing `dateOfBirth` into `/celebrationProfiles/{employeeId}` or updating another employee's `/employees/{id}` `dateOfBirth` without Super Admin role.
+14. **Duplicate Annual Celebration Spam**: Creating `/celebrationNotifications/randomId` without matching deterministic `cel_{type}_{employeeId}_{year}` ID, or creating notifications for Inactive/Resigned/Terminated employees.
+15. **Wish Impersonation / Unauthorized Moderation**: Creating `/celebrationWishes/{wishId}` with another user's `authorUid`, or deleting another employee's wish without Super Admin role.
+16. **Regularization Cross-Employee Submission or Self-Approval**: Employee submitting `/attendanceCorrections/{id}` with another employee's `employeeUid`, or approving their own pending regularization request.
+17. **Unauthorized Team Lead Queue Access / Duplicate Approval**: Team Leader without `canApproveCorrections` reading or approving another employee's regularization request, or re-approving an already `Approved`/`Rejected` request.
+18. **Duplicate Unresolved Regularization Lock Bypass**: Submitting a second `/regularizationLocks/{employeeId}_{date}_{requestType}` while a `Pending` request already holds that deterministic lock.
+19. **Cross-Employee Web Push Subscription Access**: Any user reading, listing, modifying, or deleting another employee's `/pushSubscriptions/{subId}` encryption keys or endpoint.
+20. **Unauthorized Reminder Settings or Audit Modification**: Non-Super-Admin modifying `companySettings.attendanceReminders` or tampering with existing `/attendanceReminderLogs/{logId}` entries.
+
+

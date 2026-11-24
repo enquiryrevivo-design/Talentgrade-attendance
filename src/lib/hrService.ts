@@ -53,6 +53,15 @@ import {
   normalizeLeavePolicyConfig,
   round2,
 } from '../../shared/leaveAccrualEngine';
+import {
+  DEFAULT_CELEBRATION_SETTINGS,
+  extractMonthDayFromDate,
+  normalizeCelebrationSettings,
+} from '../../shared/celebrationEngine';
+import {
+  DEFAULT_ATTENDANCE_REMINDER_SETTINGS,
+  normalizeAttendanceReminderSettings,
+} from '../../shared/attendanceReminderEngine';
 
 export const BOOTSTRAPPED_ADMIN_EMAIL = 'enquiry.revivo@gmail.com';
 
@@ -284,6 +293,8 @@ export async function saveCompanySettings(
       doc(db, 'companySettings', 'main'),
       cleanObject({
         ...settings,
+        celebrationSettings: normalizeCelebrationSettings(settings.celebrationSettings),
+        attendanceReminders: normalizeAttendanceReminderSettings(settings.attendanceReminders),
         locations: settings.locations || ['India', 'Dubai, UAE'],
         supportedCurrencies: settings.supportedCurrencies || ['INR', 'AED'],
         updatedAt: serverTimestamp(),
@@ -380,6 +391,8 @@ export async function bootstrapCompanyAndAdmin(user: User): Promise<{
       defaultSickLeave: 12,
       defaultCasualLeave: 12,
       leavePolicy: DEFAULT_LEAVE_POLICY,
+      celebrationSettings: DEFAULT_CELEBRATION_SETTINGS,
+      attendanceReminders: DEFAULT_ATTENDANCE_REMINDER_SETTINGS,
       currency: 'INR',
       teamLeaderPermissions: {
         canViewAllEmployees: true,
@@ -395,8 +408,13 @@ export async function bootstrapCompanyAndAdmin(user: User): Promise<{
       updatedAt: serverTimestamp(),
     });
     settings = defaultSettings;
-  } else if (settings.companyName === 'Meridian Internal Operations' || !settings.leavePolicy) {
-    // Non-destructive upgrade: preserve all existing settings and add leavePolicy defaults if missing
+  } else if (
+    settings.companyName === 'Meridian Internal Operations' ||
+    !settings.leavePolicy ||
+    !settings.celebrationSettings ||
+    !settings.attendanceReminders
+  ) {
+    // Non-destructive upgrade: preserve all existing settings and add defaults if missing
     const upgraded: Omit<CompanySettings, 'updatedAt'> = {
       ...settings,
       companyName:
@@ -405,6 +423,8 @@ export async function bootstrapCompanyAndAdmin(user: User): Promise<{
       supportedCurrencies: settings.supportedCurrencies || ['INR', 'AED'],
       currency: settings.currency === 'USD' ? 'INR' : settings.currency,
       leavePolicy: normalizeLeavePolicyConfig(settings.leavePolicy),
+      celebrationSettings: normalizeCelebrationSettings(settings.celebrationSettings),
+      attendanceReminders: normalizeAttendanceReminderSettings(settings.attendanceReminders),
       updatedBy: user.uid,
     };
     await setDoc(doc(db, 'companySettings', 'main'), cleanObject({
@@ -623,6 +643,7 @@ export async function createEmployeeAccount(
     department: string;
     designation: string;
     joiningDate: string;
+    dateOfBirth?: string;
     location: string;
     timezone: string;
     currency: string;
@@ -645,6 +666,8 @@ export async function createEmployeeAccount(
 ): Promise<{ employee: Employee; authProvisioned: boolean; note?: string }> {
   const id = makeSafeId('emp');
   const normalizedEmail = input.email.trim().toLowerCase();
+  const normalizedDob = input.dateOfBirth?.trim() || undefined;
+  const birthdayMonthDay = extractMonthDayFromDate(normalizedDob);
   const policy = normalizeLeavePolicyConfig(options?.leavePolicy);
   const clEligibilityDate = calculateCasualLeaveEligibilityDate(
     input.joiningDate,
@@ -669,6 +692,8 @@ export async function createEmployeeAccount(
       department: input.department,
       designation: input.designation.trim(),
       joiningDate: input.joiningDate,
+      dateOfBirth: normalizedDob,
+      birthdayMonthDay,
       status: 'Active' as EmployeeStatus,
       location: input.location || 'India',
       timezone: input.timezone || 'Asia/Kolkata',
@@ -695,6 +720,29 @@ export async function createEmployeeAccount(
     });
 
     await setDoc(doc(db, 'employees', id), empData);
+
+    // Maintain privacy-safe celebration projection (never includes dateOfBirth / birth year)
+    try {
+      await setDoc(
+        doc(db, 'celebrationProfiles', id),
+        cleanObject({
+          employeeId: id,
+          employeeUid: '',
+          fullName: empData.fullName,
+          department: empData.department,
+          designation: empData.designation,
+          location: empData.location,
+          status: empData.status,
+          role: empData.role,
+          profilePhotoAssetId: empData.profilePhotoAssetId,
+          birthdayMonthDay,
+          joiningDate: empData.joiningDate,
+          updatedAt: serverTimestamp(),
+        })
+      );
+    } catch (celErr) {
+      console.warn('Celebration profile projection skipped:', celErr);
+    }
 
     // Record authoritative initial monthly accrual ledger entries & any opening admin override
     try {
@@ -778,6 +826,10 @@ export async function createEmployeeAccount(
           uid: cred.user.uid,
           updatedAt: serverTimestamp(),
         });
+        await updateDoc(doc(db, 'celebrationProfiles', id), {
+          employeeUid: cred.user.uid,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
         await setDoc(doc(db, 'roles', cred.user.uid), {
           uid: cred.user.uid,
           email: normalizedEmail,
@@ -859,6 +911,22 @@ export async function updateEmployeeProfile(
     delete safeUpdates.id;
     delete safeUpdates.createdAt;
 
+    if ('dateOfBirth' in updates) {
+      const dobTrimmed = typeof updates.dateOfBirth === 'string' ? updates.dateOfBirth.trim() : '';
+      if (dobTrimmed) {
+        const md = extractMonthDayFromDate(dobTrimmed);
+        safeUpdates.dateOfBirth = dobTrimmed;
+        if (md) {
+          safeUpdates.birthdayMonthDay = md;
+        } else {
+          safeUpdates.birthdayMonthDay = deleteField();
+        }
+      } else {
+        safeUpdates.dateOfBirth = deleteField();
+        safeUpdates.birthdayMonthDay = deleteField();
+      }
+    }
+
     if (options?.clearScheduleOverrides) {
       safeUpdates.officeStartTime = deleteField();
       safeUpdates.officeEndTime = deleteField();
@@ -869,6 +937,36 @@ export async function updateEmployeeProfile(
     }
 
     await updateDoc(empRef, safeUpdates);
+
+    // Sync privacy-safe celebration profile projection
+    try {
+      const nextBirthdayMonthDay =
+        'dateOfBirth' in updates
+          ? extractMonthDayFromDate(typeof updates.dateOfBirth === 'string' ? updates.dateOfBirth.trim() : '')
+          : prev.birthdayMonthDay || extractMonthDayFromDate(prev.dateOfBirth);
+      const nextPhotoId =
+        'profilePhotoAssetId' in updates ? updates.profilePhotoAssetId : prev.profilePhotoAssetId;
+
+      await setDoc(
+        doc(db, 'celebrationProfiles', employeeId),
+        cleanObject({
+          employeeId,
+          employeeUid: updates.uid ?? prev.uid ?? '',
+          fullName: updates.fullName ?? prev.fullName,
+          department: updates.department ?? prev.department,
+          designation: updates.designation ?? prev.designation,
+          location: updates.location ?? prev.location ?? 'India',
+          status: updates.status ?? prev.status,
+          role: updates.role ?? prev.role,
+          profilePhotoAssetId: nextPhotoId || undefined,
+          birthdayMonthDay: nextBirthdayMonthDay || undefined,
+          joiningDate: updates.joiningDate ?? prev.joiningDate,
+          updatedAt: serverTimestamp(),
+        })
+      );
+    } catch (celErr) {
+      console.warn('Celebration profile sync skipped:', celErr);
+    }
 
     // Keep immutable leaveLedger synchronized when Super Admin directly edits SL/CL balances in profile
     const actorUid = auth.currentUser?.uid || actor.uid;

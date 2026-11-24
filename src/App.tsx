@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ThemeProvider } from './context/ThemeContext';
@@ -18,11 +18,48 @@ import { EmployeesView } from './views/EmployeesView';
 import { PayrollView } from './views/PayrollView';
 import { ReportsView } from './views/ReportsView';
 import { SettingsView } from './views/SettingsView';
+import { CelebrationsView } from './views/CelebrationsView';
+import { CelebrationProvider } from './context/CelebrationContext';
+import { HrNotificationProvider } from './context/HrNotificationContext';
+import { CelebrationWishModal } from './components/CelebrationWishModal';
 import { AppPage } from './types/hr';
+
+const VALID_PAGES = new Set<AppPage>([
+  'dashboard',
+  'attendance',
+  'leaves',
+  'employees',
+  'payroll',
+  'celebrations',
+  'reports',
+  'settings',
+]);
+
+function resolveInitialPage(): AppPage {
+  if (typeof window === 'undefined') return 'dashboard';
+  const param = new URLSearchParams(window.location.search).get('page') as AppPage | null;
+  if (param && VALID_PAGES.has(param)) {
+    return param;
+  }
+  return 'dashboard';
+}
 
 function AppRouter() {
   const { employee, loading } = useAuth();
-  const [activePage, setActivePage] = useState<AppPage>('dashboard');
+  const [activePage, setActivePage] = useState<AppPage>(() => resolveInitialPage());
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
+    const handleSwMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === 'NAVIGATE_ATTENDANCE') {
+        setActivePage('attendance');
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', handleSwMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+    };
+  }, []);
 
   if (loading) {
     return (
@@ -42,17 +79,19 @@ function AppRouter() {
       case 'dashboard':
         return <DashboardView onNavigate={setActivePage} />;
       case 'attendance':
-        return <AttendanceView />;
+        return <AttendanceView onNavigate={setActivePage} />;
       case 'leaves':
         return <LeavesView />;
       case 'employees':
         return employee.role === 'employee' ? <DashboardView onNavigate={setActivePage} /> : <EmployeesView />;
       case 'payroll':
         return <PayrollView />;
+      case 'celebrations':
+        return <CelebrationsView />;
       case 'reports':
         return employee.role === 'employee' ? <DashboardView onNavigate={setActivePage} /> : <ReportsView />;
       case 'settings':
-        return employee.role === 'super_admin' ? <SettingsView /> : <DashboardView onNavigate={setActivePage} />;
+        return <SettingsView />;
       default:
         return <DashboardView onNavigate={setActivePage} />;
     }
@@ -61,6 +100,7 @@ function AppRouter() {
   return (
     <>
       <ForcePasswordChangeModal />
+      <CelebrationWishModal />
       <AppShell activePage={activePage} onNavigate={setActivePage}>
         {renderPage()}
       </AppShell>
@@ -74,7 +114,11 @@ export default function App() {
       <ThemeProvider>
         <ToastProvider>
           <AuthProvider>
-            <AppRouter />
+            <CelebrationProvider>
+              <HrNotificationProvider>
+                <AppRouter />
+              </HrNotificationProvider>
+            </CelebrationProvider>
           </AuthProvider>
         </ToastProvider>
       </ThemeProvider>

@@ -82,7 +82,7 @@ service cloud.firestore {
           'taxId', 'logoAssetId', 'locations', 'supportedCurrencies',
           'officeStartTime', 'officeEndTime', 'gracePeriodMinutes',
           'halfDayMinHours', 'fullDayMinHours', 'workingDays', 'holidays',
-          'defaultSickLeave', 'defaultCasualLeave', 'leavePolicy', 'currency', 'teamLeaderPermissions',
+          'defaultSickLeave', 'defaultCasualLeave', 'leavePolicy', 'celebrationSettings', 'attendanceReminders', 'currency', 'teamLeaderPermissions',
           'updatedAt', 'updatedBy'
         ]) &&
         isStringSize(data.companyName, 1, 120) &&
@@ -104,6 +104,8 @@ service cloud.firestore {
         data.defaultSickLeave is number && data.defaultSickLeave >= 0 && data.defaultSickLeave <= 100 &&
         data.defaultCasualLeave is number && data.defaultCasualLeave >= 0 && data.defaultCasualLeave <= 100 &&
         (!( 'leavePolicy' in data ) || data.leavePolicy is map) &&
+        (!( 'celebrationSettings' in data ) || data.celebrationSettings is map) &&
+        (!( 'attendanceReminders' in data ) || data.attendanceReminders is map) &&
         isStringSize(data.currency, 1, 10) &&
         data.teamLeaderPermissions is map &&
         data.updatedAt == request.time &&
@@ -139,13 +141,13 @@ service cloud.firestore {
         ]) &&
         data.keys().hasOnly([
           'uid', 'employeeCode', 'fullName', 'email', 'phone', 'emergencyContact',
-          'role', 'department', 'designation', 'joiningDate', 'status',
+          'role', 'department', 'designation', 'joiningDate', 'dateOfBirth', 'birthdayMonthDay', 'status',
           'location', 'timezone', 'currency',
           'officeStartTime', 'officeEndTime', 'gracePeriodMinutes',
           'halfDayMinHours', 'fullDayMinHours', 'workingDays',
           'managerUid', 'profilePhotoAssetId', 'sickLeaveBalance', 'casualLeaveBalance',
           'carryForwardBalance', 'leavePolicyMigrated', 'leaveLastSyncedMonth',
-          'leaveLastResetYear', 'clEligibilityDate', 'leaveMigrationNote',
+          'leaveLastResetYear', 'clEligibilityDate', 'leaveMigrationNote', 'reminderPreferences',
           'mustChangePassword', 'failedLoginAttempts',
           'lockedUntil', 'createdAt', 'updatedAt'
         ]) &&
@@ -159,6 +161,8 @@ service cloud.firestore {
         isStringSize(data.department, 1, 80) &&
         isStringSize(data.designation, 1, 80) &&
         isStringSize(data.joiningDate, 10, 10) &&
+        (!( 'dateOfBirth' in data ) || data.dateOfBirth == '' || (data.dateOfBirth is string && data.dateOfBirth.matches('^\\d{4}-\\d{2}-\\d{2}$'))) &&
+        (!( 'birthdayMonthDay' in data ) || data.birthdayMonthDay == '' || (data.birthdayMonthDay is string && data.birthdayMonthDay.matches('^\\d{2}-\\d{2}$'))) &&
         data.status in ['Active', 'Inactive', 'Resigned', 'Terminated'] &&
         isOptionalStringSize(data, 'location', 80) &&
         isOptionalStringSize(data, 'timezone', 80) &&
@@ -179,6 +183,7 @@ service cloud.firestore {
         (!( 'leaveLastResetYear' in data ) || (data.leaveLastResetYear is number && data.leaveLastResetYear >= 2000 && data.leaveLastResetYear <= 2100)) &&
         isOptionalStringSize(data, 'clEligibilityDate', 10) &&
         isOptionalStringSize(data, 'leaveMigrationNote', 300) &&
+        (!( 'reminderPreferences' in data ) || data.reminderPreferences is map) &&
         data.mustChangePassword is bool &&
         data.failedLoginAttempts is number && data.failedLoginAttempts >= 0 && data.failedLoginAttempts <= 20 &&
         isOptionalStringSize(data, 'lockedUntil', 40) &&
@@ -283,27 +288,84 @@ service cloud.firestore {
           'attendanceRecordId', 'requestedPunchIn', 'requestedPunchOut', 'reason', 'status', 'createdAt'
         ]) &&
         data.keys().hasOnly([
-          'employeeId', 'employeeUid', 'employeeName', 'department', 'managerUid', 'date',
-          'attendanceRecordId', 'requestedPunchIn', 'requestedPunchOut', 'reason',
-          'attachmentAssetId', 'status', 'reviewedBy', 'reviewedByName', 'reviewComment', 'reviewedAt', 'createdAt'
+          'employeeId', 'employeeUid', 'employeeCode', 'employeeName', 'department', 'managerUid',
+          'date', 'timezone', 'attendanceRecordId', 'requestType',
+          'requestedPunchIn', 'requestedPunchOut',
+          'originalPunchInTime', 'originalPunchOutTime', 'originalStatus', 'originalWorkingMinutes',
+          'reason', 'attachmentAssetId', 'status', 'reviewedBy', 'reviewedByName', 'reviewedByRole',
+          'reviewComment', 'appliedChanges', 'submittedAtIso', 'reviewedAt', 'createdAt'
         ]) &&
         isStringSize(data.employeeId, 1, 128) &&
         isStringSize(data.employeeUid, 1, 128) &&
+        isOptionalStringSize(data, 'employeeCode', 40) &&
         isStringSize(data.employeeName, 1, 120) &&
         isStringSize(data.department, 1, 80) &&
         isOptionalStringSize(data, 'managerUid', 128) &&
-        isStringSize(data.date, 10, 10) &&
+        data.date is string && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+        isOptionalStringSize(data, 'timezone', 80) &&
         isStringSize(data.attendanceRecordId, 1, 160) &&
-        isStringSize(data.requestedPunchIn, 5, 5) &&
-        isStringSize(data.requestedPunchOut, 5, 5) &&
+        (!( 'requestType' in data ) || data.requestType in ['missed_punch_in', 'missed_punch_out', 'both_missed', 'incorrect_punch', 'other_discrepancy']) &&
+        isStringSize(data.requestedPunchIn, 0, 5) &&
+        (data.requestedPunchIn == '' || data.requestedPunchIn.matches('^([01]\\d|2[0-3]):[0-5]\\d$')) &&
+        isStringSize(data.requestedPunchOut, 0, 5) &&
+        (data.requestedPunchOut == '' || data.requestedPunchOut.matches('^([01]\\d|2[0-3]):[0-5]\\d$')) &&
+        isOptionalStringSize(data, 'originalPunchInTime', 40) &&
+        isOptionalStringSize(data, 'originalPunchOutTime', 40) &&
+        (!( 'originalStatus' in data ) || data.originalStatus in ['Present', 'Late', 'Half Day', 'Absent', 'Leave', 'Incomplete Attendance', 'Holiday', 'Weekly Off']) &&
+        (!( 'originalWorkingMinutes' in data ) || (data.originalWorkingMinutes is number && data.originalWorkingMinutes >= 0 && data.originalWorkingMinutes <= 1440)) &&
         isStringSize(data.reason, 3, 500) &&
         isOptionalStringSize(data, 'attachmentAssetId', 128) &&
         data.status in ['Pending', 'Approved', 'Rejected'] &&
         isOptionalStringSize(data, 'reviewedBy', 128) &&
         isOptionalStringSize(data, 'reviewedByName', 120) &&
+        (!( 'reviewedByRole' in data ) || data.reviewedByRole in ['super_admin', 'team_leader', 'employee']) &&
         isOptionalStringSize(data, 'reviewComment', 500) &&
+        (!( 'appliedChanges' in data ) || data.appliedChanges is map) &&
+        isOptionalStringSize(data, 'submittedAtIso', 40) &&
         (!( 'reviewedAt' in data ) || data.reviewedAt is timestamp) &&
         data.createdAt is timestamp;
+    }
+
+    function isValidRegularizationLock(data) {
+      return data.keys().hasAll(['employeeId', 'employeeUid', 'date', 'requestType', 'correctionId', 'createdAt']) &&
+        data.keys().hasOnly(['employeeId', 'employeeUid', 'date', 'requestType', 'correctionId', 'createdAt']) &&
+        isStringSize(data.employeeId, 1, 128) &&
+        isStringSize(data.employeeUid, 1, 128) &&
+        data.date is string && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+        data.requestType in ['missed_punch_in', 'missed_punch_out', 'both_missed', 'incorrect_punch', 'other_discrepancy'] &&
+        isStringSize(data.correctionId, 1, 128) &&
+        data.createdAt == request.time;
+    }
+
+    function isValidHrNotification(data) {
+      return data.keys().hasAll([
+          'category', 'eventType', 'audienceType', 'requestId', 'employeeId',
+          'employeeName', 'department', 'attendanceDate', 'requestType',
+          'title', 'message', 'actorUid', 'actorName', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'category', 'eventType', 'audienceType', 'targetUid', 'requestId',
+          'employeeId', 'employeeCode', 'employeeName', 'department', 'attendanceDate',
+          'requestType', 'title', 'message', 'note', 'actorUid', 'actorName', 'createdAt'
+        ]) &&
+        data.category == 'regularization' &&
+        data.eventType in ['submitted_confirmation', 'submitted_admin', 'approved', 'rejected'] &&
+        data.audienceType in ['user', 'reviewers'] &&
+        isOptionalStringSize(data, 'targetUid', 128) &&
+        isStringSize(data.requestId, 1, 128) &&
+        isStringSize(data.employeeId, 1, 128) &&
+        isOptionalStringSize(data, 'employeeCode', 40) &&
+        isStringSize(data.employeeName, 1, 120) &&
+        isStringSize(data.department, 1, 80) &&
+        data.attendanceDate is string && data.attendanceDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+        data.requestType in ['missed_punch_in', 'missed_punch_out', 'both_missed', 'incorrect_punch', 'other_discrepancy'] &&
+        isStringSize(data.title, 1, 160) &&
+        isStringSize(data.message, 1, 400) &&
+        isOptionalStringSize(data, 'note', 500) &&
+        isStringSize(data.actorUid, 1, 128) &&
+        data.actorUid == request.auth.uid &&
+        isStringSize(data.actorName, 1, 120) &&
+        data.createdAt == request.time;
     }
 
     function isValidLeaveApplication(data) {
@@ -431,6 +493,151 @@ service cloud.firestore {
         data.createdAt == request.time;
     }
 
+    function isValidCelebrationProfile(data) {
+      return data.keys().hasAll([
+          'employeeId', 'employeeUid', 'fullName', 'department', 'designation',
+          'location', 'status', 'role', 'joiningDate', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'employeeId', 'employeeUid', 'fullName', 'department', 'designation',
+          'location', 'status', 'role', 'profilePhotoAssetId', 'birthdayMonthDay',
+          'joiningDate', 'updatedAt'
+        ]) &&
+        isStringSize(data.employeeId, 1, 128) &&
+        data.employeeUid is string && data.employeeUid.size() <= 128 &&
+        isStringSize(data.fullName, 1, 120) &&
+        isStringSize(data.department, 1, 80) &&
+        isStringSize(data.designation, 1, 80) &&
+        isStringSize(data.location, 1, 80) &&
+        data.status in ['Active', 'Inactive', 'Resigned', 'Terminated'] &&
+        data.role in ['super_admin', 'team_leader', 'employee'] &&
+        isOptionalStringSize(data, 'profilePhotoAssetId', 128) &&
+        (!( 'birthdayMonthDay' in data ) || (data.birthdayMonthDay is string && data.birthdayMonthDay.matches('^\\d{2}-\\d{2}$'))) &&
+        data.joiningDate is string && data.joiningDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidCelebrationNotification(data) {
+      return data.keys().hasAll([
+          'type', 'employeeId', 'employeeUid', 'employeeName', 'department', 'designation',
+          'celebrationDate', 'celebrationMonthDay', 'year', 'title', 'message',
+          'audienceScope', 'createdByUid', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'type', 'employeeId', 'employeeUid', 'employeeName', 'department', 'designation',
+          'profilePhotoAssetId', 'celebrationDate', 'celebrationMonthDay', 'year',
+          'yearsCompleted', 'title', 'message', 'audienceScope', 'createdByUid', 'createdAt'
+        ]) &&
+        data.type in ['birthday', 'anniversary'] &&
+        isStringSize(data.employeeId, 1, 128) &&
+        data.employeeUid is string && data.employeeUid.size() <= 128 &&
+        isStringSize(data.employeeName, 1, 120) &&
+        isStringSize(data.department, 1, 80) &&
+        data.designation is string && data.designation.size() <= 80 &&
+        isOptionalStringSize(data, 'profilePhotoAssetId', 128) &&
+        data.celebrationDate is string && data.celebrationDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+        data.celebrationMonthDay is string && data.celebrationMonthDay.matches('^\\d{2}-\\d{2}$') &&
+        data.year is int && data.year >= 2000 && data.year <= 2100 &&
+        (!( 'yearsCompleted' in data ) || (data.yearsCompleted is int && data.yearsCompleted >= 1 && data.yearsCompleted <= 80)) &&
+        isStringSize(data.title, 1, 160) &&
+        isStringSize(data.message, 1, 300) &&
+        data.audienceScope in ['all_active', 'department', 'leaders_only'] &&
+        isStringSize(data.createdByUid, 1, 128) &&
+        data.createdByUid == request.auth.uid &&
+        data.createdAt == request.time;
+    }
+
+    function isValidNotificationRead(data) {
+      return data.keys().hasAll(['uid', 'notificationId', 'readAt']) &&
+        data.keys().hasOnly(['uid', 'notificationId', 'readAt']) &&
+        isStringSize(data.uid, 1, 128) &&
+        data.uid == request.auth.uid &&
+        isStringSize(data.notificationId, 1, 128) &&
+        data.readAt == request.time;
+    }
+
+    function isValidCelebrationWish(data) {
+      return data.keys().hasAll([
+          'notificationId', 'type', 'recipientEmployeeId', 'recipientName',
+          'authorUid', 'authorEmployeeId', 'authorName', 'authorDepartment',
+          'emoji', 'message', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'notificationId', 'type', 'recipientEmployeeId', 'recipientName',
+          'authorUid', 'authorEmployeeId', 'authorName', 'authorDepartment',
+          'authorPhotoAssetId', 'emoji', 'message', 'createdAt'
+        ]) &&
+        isStringSize(data.notificationId, 1, 128) &&
+        data.type in ['birthday', 'anniversary'] &&
+        isStringSize(data.recipientEmployeeId, 1, 128) &&
+        isStringSize(data.recipientName, 1, 120) &&
+        isStringSize(data.authorUid, 1, 128) &&
+        data.authorUid == request.auth.uid &&
+        isStringSize(data.authorEmployeeId, 1, 128) &&
+        isStringSize(data.authorName, 1, 120) &&
+        isStringSize(data.authorDepartment, 1, 80) &&
+        isOptionalStringSize(data, 'authorPhotoAssetId', 128) &&
+        data.emoji in ['🎉', '🎂', '👏', '🌟', '💐', '🏆'] &&
+        isStringSize(data.message, 1, 400) &&
+        data.createdAt == request.time;
+    }
+
+    function isValidPushSubscription(data) {
+      return data.keys().hasAll([
+          'employeeId', 'employeeUid', 'endpoint', 'keys', 'deviceLabel',
+          'status', 'createdAtIso', 'updatedAtIso'
+        ]) &&
+        data.keys().hasOnly([
+          'employeeId', 'employeeUid', 'endpoint', 'keys', 'expirationTime',
+          'deviceLabel', 'status', 'lastFailureReason', 'createdAtIso', 'updatedAtIso'
+        ]) &&
+        isStringSize(data.employeeId, 1, 128) &&
+        isStringSize(data.employeeUid, 1, 128) &&
+        data.employeeUid == request.auth.uid &&
+        isStringSize(data.endpoint, 10, 1200) &&
+        data.keys is map &&
+        (!( 'expirationTime' in data ) || data.expirationTime == null || data.expirationTime is number) &&
+        isStringSize(data.deviceLabel, 1, 120) &&
+        data.status in ['active', 'expired', 'inactive'] &&
+        isOptionalStringSize(data, 'lastFailureReason', 300) &&
+        isStringSize(data.createdAtIso, 10, 40) &&
+        isStringSize(data.updatedAtIso, 10, 40);
+    }
+
+    function isValidAttendanceReminderLog(data) {
+      return data.keys().hasAll([
+          'dedupKey', 'employeeId', 'employeeUid', 'employeeName', 'department',
+          'reminderType', 'attendanceDate', 'title', 'body', 'status', 'sentAtIso'
+        ]) &&
+        data.keys().hasOnly([
+          'dedupKey', 'employeeId', 'employeeUid', 'employeeName', 'department',
+          'location', 'reminderType', 'attendanceDate', 'timezone', 'title', 'body',
+          'url', 'status', 'reason', 'subscriptionId', 'deviceLabel', 'failureDetail', 'sentAtIso'
+        ]) &&
+        isStringSize(data.dedupKey, 1, 160) &&
+        isStringSize(data.employeeId, 1, 128) &&
+        isStringSize(data.employeeUid, 1, 128) &&
+        isStringSize(data.employeeName, 1, 120) &&
+        isStringSize(data.department, 1, 80) &&
+        isOptionalStringSize(data, 'location', 80) &&
+        data.reminderType in ['punch_in', 'missed_punch_in', 'punch_out', 'missed_punch_out'] &&
+        data.attendanceDate is string && data.attendanceDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+        isOptionalStringSize(data, 'timezone', 80) &&
+        isStringSize(data.title, 1, 160) &&
+        isStringSize(data.body, 1, 400) &&
+        isOptionalStringSize(data, 'url', 240) &&
+        data.status in ['sent', 'failed', 'expired', 'skipped'] &&
+        isOptionalStringSize(data, 'reason', 240) &&
+        isOptionalStringSize(data, 'subscriptionId', 128) &&
+        isOptionalStringSize(data, 'deviceLabel', 120) &&
+        isOptionalStringSize(data, 'failureDetail', 300) &&
+        isStringSize(data.sentAtIso, 10, 40);
+    }
+
+    function getCallerDepartment() {
+      return get(/databases/$(database)/documents/employees/$(get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.employeeId)).data.department;
+    }
+
     // --- Collection Rules ---
 
     match /test/{docId} {
@@ -498,7 +705,7 @@ service cloud.firestore {
           incoming().uid == request.auth.uid &&
           incoming().diff(existing()).affectedKeys().hasOnly(['uid', 'mustChangePassword', 'failedLoginAttempts', 'lockedUntil', 'updatedAt'])) ||
         (isActiveEmployee() && existing().uid == request.auth.uid &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['phone', 'emergencyContact', 'profilePhotoAssetId', 'mustChangePassword', 'updatedAt']))
+          incoming().diff(existing()).affectedKeys().hasOnly(['phone', 'emergencyContact', 'profilePhotoAssetId', 'mustChangePassword', 'reminderPreferences', 'updatedAt']))
       );
       allow delete: if isSuperAdmin() && isValidId(employeeId);
     }
@@ -526,6 +733,7 @@ service cloud.firestore {
       allow create: if isValidId(recordId) && isValidAttendanceRecord(incoming()) && incoming().createdAt == request.time && (
         isSuperAdmin() ||
         hasLeaderPermission('canEditAttendance') ||
+        hasLeaderPermission('canApproveCorrections') ||
         (isActiveEmployee() && incoming().employeeUid == request.auth.uid)
       );
       allow update: if isValidId(recordId) && isValidAttendanceRecord(incoming()) && incoming().createdAt == existing().createdAt && (
@@ -584,14 +792,15 @@ service cloud.firestore {
 
     match /attendanceCorrections/{correctionId} {
       allow get: if isSignedIn() && isValidId(correctionId) && (
-        isSuperAdmin() || isTeamLeader() || existing().employeeUid == request.auth.uid
+        isSuperAdmin() ||
+        hasLeaderPermission('canApproveCorrections') ||
+        existing().employeeUid == request.auth.uid
       );
       allow list: if isSignedIn() && (
         isBootstrappedAdmin() ||
-        resource.data.employeeUid == request.auth.uid ||
-        resource.data.managerUid == request.auth.uid ||
         isSuperAdmin() ||
-        isTeamLeader()
+        hasLeaderPermission('canApproveCorrections') ||
+        resource.data.employeeUid == request.auth.uid
       );
       allow create: if isValidId(correctionId) && isValidAttendanceCorrection(incoming()) &&
         incoming().createdAt == request.time &&
@@ -599,12 +808,59 @@ service cloud.firestore {
         isActiveEmployee() &&
         incoming().employeeUid == request.auth.uid;
       allow update: if isValidId(correctionId) && isValidAttendanceCorrection(incoming()) &&
-        incoming().createdAt == existing().createdAt && (
-        isSuperAdmin() ||
-        (hasLeaderPermission('canApproveCorrections') && existing().status == 'Pending' && incoming().status in ['Approved', 'Rejected'] &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'reviewedBy', 'reviewedByName', 'reviewComment', 'reviewedAt']))
-      );
+        incoming().createdAt == existing().createdAt &&
+        existing().status == 'Pending' &&
+        incoming().status in ['Approved', 'Rejected'] &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'reviewedBy', 'reviewedByName', 'reviewedByRole', 'reviewComment', 'reviewedAt', 'appliedChanges'
+        ]) && (
+          isSuperAdmin() ||
+          hasLeaderPermission('canApproveCorrections')
+        );
       allow delete: if isSuperAdmin() && isValidId(correctionId);
+    }
+
+    match /regularizationLocks/{lockId} {
+      allow get: if isSignedIn() && isValidId(lockId) && (
+        isSuperAdmin() ||
+        hasLeaderPermission('canApproveCorrections') ||
+        resource == null ||
+        existing().employeeUid == request.auth.uid
+      );
+      allow list: if false;
+      allow create: if isValidId(lockId) &&
+        isActiveEmployee() &&
+        isValidRegularizationLock(incoming()) &&
+        incoming().employeeUid == request.auth.uid &&
+        lockId == (incoming().employeeId + '_' + incoming().date + '_' + incoming().requestType);
+      allow update: if false;
+      allow delete: if isValidId(lockId) && (isSuperAdmin() || hasLeaderPermission('canApproveCorrections'));
+    }
+
+    match /hrNotifications/{notifId} {
+      allow get: if isSignedIn() && isValidId(notifId) && isActiveEmployee() && (
+        isSuperAdmin() ||
+        existing().targetUid == request.auth.uid ||
+        (existing().audienceType == 'reviewers' && hasLeaderPermission('canApproveCorrections'))
+      );
+      allow list: if isBootstrappedAdmin() || isSuperAdmin() || (
+        isActiveEmployee() && (
+          resource.data.targetUid == request.auth.uid ||
+          (resource.data.audienceType == 'reviewers' && hasLeaderPermission('canApproveCorrections'))
+        )
+      );
+      allow create: if isValidId(notifId) &&
+        isActiveEmployee() &&
+        isValidHrNotification(incoming()) && (
+          (incoming().audienceType == 'user' && (
+            incoming().targetUid == request.auth.uid ||
+            isSuperAdmin() ||
+            hasLeaderPermission('canApproveCorrections')
+          )) ||
+          (incoming().audienceType == 'reviewers' && incoming().eventType == 'submitted_admin')
+        );
+      allow update: if false;
+      allow delete: if isValidId(notifId) && isSuperAdmin();
     }
 
     match /leaveApplications/{leaveId} {
@@ -681,6 +937,101 @@ service cloud.firestore {
       allow list: if isBootstrappedAdmin() || isSuperAdmin();
       allow create: if isValidId(logId) && isValidAuditLog(incoming()) && isActiveEmployee();
       allow update, delete: if false;
+    }
+
+    match /celebrationProfiles/{employeeId} {
+      allow get: if isValidId(employeeId) && isActiveEmployee();
+      allow list: if isActiveEmployee();
+      allow create, update: if isValidId(employeeId) && isValidCelebrationProfile(incoming()) && (
+        isSuperAdmin() ||
+        (isActiveEmployee() &&
+          incoming().employeeId == employeeId &&
+          incoming().employeeUid == request.auth.uid &&
+          exists(/databases/$(database)/documents/employees/$(employeeId)) &&
+          get(/databases/$(database)/documents/employees/$(employeeId)).data.uid == request.auth.uid &&
+          incoming().status == get(/databases/$(database)/documents/employees/$(employeeId)).data.status &&
+          incoming().joiningDate == get(/databases/$(database)/documents/employees/$(employeeId)).data.joiningDate &&
+          (!( 'birthdayMonthDay' in incoming() ) || incoming().birthdayMonthDay == get(/databases/$(database)/documents/employees/$(employeeId)).data.get('birthdayMonthDay', '')))
+      );
+      allow delete: if isValidId(employeeId) && isSuperAdmin();
+    }
+
+    match /celebrationNotifications/{notificationId} {
+      allow get: if isValidId(notificationId) && isActiveEmployee() && (
+        isSuperAdmin() ||
+        existing().employeeUid == request.auth.uid ||
+        existing().audienceScope == 'all_active' ||
+        (existing().audienceScope == 'leaders_only' && isLeaderOrAdmin()) ||
+        (existing().audienceScope == 'department' && existing().department == getCallerDepartment())
+      );
+      allow list: if isBootstrappedAdmin() || isSuperAdmin() || (
+        isActiveEmployee() && (
+          resource.data.audienceScope == 'all_active' ||
+          resource.data.employeeUid == request.auth.uid ||
+          (resource.data.audienceScope == 'leaders_only' && isTeamLeader()) ||
+          (resource.data.audienceScope == 'department' && resource.data.department == getCallerDepartment())
+        )
+      );
+      allow create: if isValidId(notificationId) &&
+        isActiveEmployee() &&
+        isValidCelebrationNotification(incoming()) &&
+        notificationId == ('cel_' + incoming().type + '_' + incoming().employeeId + '_' + string(incoming().year)) &&
+        exists(/databases/$(database)/documents/celebrationProfiles/$(incoming().employeeId)) &&
+        get(/databases/$(database)/documents/celebrationProfiles/$(incoming().employeeId)).data.status == 'Active';
+      allow update: if false;
+      allow delete: if isValidId(notificationId) && isSuperAdmin();
+    }
+
+    match /notificationReads/{readId} {
+      allow get: if isValidId(readId) && isSignedIn() && existing().uid == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow create, update: if isValidId(readId) &&
+        isActiveEmployee() &&
+        isValidNotificationRead(incoming()) &&
+        readId == (request.auth.uid + '_' + incoming().notificationId) && (
+          exists(/databases/$(database)/documents/celebrationNotifications/$(incoming().notificationId)) ||
+          exists(/databases/$(database)/documents/hrNotifications/$(incoming().notificationId))
+        );
+      allow delete: if isValidId(readId) && isSignedIn() && (existing().uid == request.auth.uid || isSuperAdmin());
+    }
+
+    match /celebrationWishes/{wishId} {
+      allow get: if isValidId(wishId) && isActiveEmployee();
+      allow list: if isActiveEmployee();
+      allow create: if isValidId(wishId) &&
+        isActiveEmployee() &&
+        isValidCelebrationWish(incoming()) &&
+        exists(/databases/$(database)/documents/celebrationNotifications/$(incoming().notificationId)) &&
+        (!exists(/databases/$(database)/documents/companySettings/main) ||
+          get(/databases/$(database)/documents/companySettings/main).data.get('celebrationSettings', {}).get('wishesEnabled', true) == true);
+      allow update: if false;
+      allow delete: if isValidId(wishId) && (
+        isSuperAdmin() ||
+        (isActiveEmployee() && existing().authorUid == request.auth.uid)
+      );
+    }
+
+    match /pushSubscriptions/{subId} {
+      allow get: if isSignedIn() && isValidId(subId) && existing().employeeUid == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.employeeUid == request.auth.uid;
+      allow create, update: if isSignedIn() && isValidId(subId) && isActiveEmployee() && isValidPushSubscription(incoming());
+      allow delete: if isSignedIn() && isValidId(subId) && existing().employeeUid == request.auth.uid;
+    }
+
+    match /attendanceReminderLogs/{logId} {
+      allow get: if isSignedIn() && isValidId(logId) && (
+        isSuperAdmin() ||
+        existing().employeeUid == request.auth.uid
+      );
+      allow list: if isBootstrappedAdmin() || isSuperAdmin() || (
+        isSignedIn() && resource.data.employeeUid == request.auth.uid
+      );
+      allow create: if isValidId(logId) && isActiveEmployee() && isValidAttendanceReminderLog(incoming()) && (
+        isSuperAdmin() ||
+        incoming().employeeUid == request.auth.uid
+      );
+      allow update: if false;
+      allow delete: if isSuperAdmin() && isValidId(logId);
     }
   }
 }

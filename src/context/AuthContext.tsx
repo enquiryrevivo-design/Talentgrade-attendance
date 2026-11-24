@@ -11,6 +11,7 @@ import {
 import { auth, googleAuthProvider } from '../lib/firebase';
 import { CompanySettings, Employee } from '../types/hr';
 import { fetchMediaAsset, resolveEmployeeSession, updateEmployeeProfile } from '../lib/hrService';
+import { syncReminderSnapshotToServer } from '../lib/pushService';
 
 interface AuthContextValue {
   firebaseUser: User | null;
@@ -70,6 +71,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await signOut(auth);
       } else {
         setEmployee(resolved.employee);
+        void syncReminderSnapshotToServer({
+          employee: resolved.employee,
+          settings: resolved.settings,
+        }).catch(() => {});
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unable to verify company account.';

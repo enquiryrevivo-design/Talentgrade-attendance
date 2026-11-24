@@ -12,11 +12,15 @@ import {
   LogOut,
   Menu,
   X,
+  Cake,
 } from 'lucide-react';
 import { AppPage, UserRole } from '../types/hr';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
+import { useHrNotifications } from '../context/HrNotificationContext';
 import { TalentGradeLogo } from './TalentGradeLogo';
+import { NotificationBell } from './NotificationBell';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface NavItem {
   id: AppPage;
@@ -31,8 +35,9 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'leaves', label: 'Leaves', icon: CalendarDays, roles: ['super_admin', 'team_leader', 'employee'] },
   { id: 'employees', label: 'Employees', icon: Users, roles: ['super_admin', 'team_leader'] },
   { id: 'payroll', label: 'Payroll', icon: Receipt, roles: ['super_admin', 'employee', 'team_leader'] },
+  { id: 'celebrations', label: 'Celebrations', icon: Cake, roles: ['super_admin', 'team_leader', 'employee'] },
   { id: 'reports', label: 'Reports', icon: BarChart3, roles: ['super_admin', 'team_leader'] },
-  { id: 'settings', label: 'Settings', icon: Settings, roles: ['super_admin'] },
+  { id: 'settings', label: 'Settings', icon: Settings, roles: ['super_admin', 'team_leader', 'employee'] },
 ];
 
 interface AppShellProps {
@@ -44,6 +49,7 @@ interface AppShellProps {
 export function AppShell({ activePage, onNavigate, children }: AppShellProps) {
   const { employee, settings, companyLogoUrl, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
+  const { canReviewRegularizations, pendingRegularizationCount } = useHrNotifications();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   if (!employee) return null;
@@ -56,6 +62,9 @@ export function AppShell({ activePage, onNavigate, children }: AppShellProps) {
   }).map((item) => {
     if (item.id === 'payroll' && employee.role !== 'super_admin') {
       return { ...item, label: 'Payslips' };
+    }
+    if (item.id === 'settings' && employee.role !== 'super_admin') {
+      return { ...item, label: 'Preferences' };
     }
     return item;
   });
@@ -99,7 +108,12 @@ export function AppShell({ activePage, onNavigate, children }: AppShellProps) {
                 }`}
               >
                 <Icon className={`w-4 h-4 shrink-0 ${active ? 'text-[#B5121B] dark:text-[#B5121B]' : ''}`} />
-                <span>{item.label}</span>
+                <span className="flex-1 text-left">{item.label}</span>
+                {item.id === 'attendance' && canReviewRegularizations && pendingRegularizationCount > 0 && (
+                  <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-[#B5121B] text-white text-[10px] font-bold font-mono tabular-nums inline-flex items-center justify-center">
+                    {pendingRegularizationCount > 99 ? '99+' : pendingRegularizationCount}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -122,6 +136,8 @@ export function AppShell({ activePage, onNavigate, children }: AppShellProps) {
               </div>
             </div>
           </div>
+
+          <PWAInstallButton compact />
 
           <div className="flex items-center gap-2">
             <button
@@ -151,6 +167,7 @@ export function AppShell({ activePage, onNavigate, children }: AppShellProps) {
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
+          <NotificationBell onNavigate={onNavigate} align="right" />
           <button
             onClick={toggleTheme}
             aria-label="Toggle dark mode"
@@ -170,7 +187,13 @@ export function AppShell({ activePage, onNavigate, children }: AppShellProps) {
 
       {/* Main Content */}
       <main className="flex-1 lg:pl-64 pb-20 lg:pb-8">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-7">{children}</div>
+        <div className="hidden lg:flex items-center justify-between max-w-7xl mx-auto px-8 pt-5 pb-1">
+          <div className="text-xs text-zinc-500 dark:text-zinc-400">
+            {companyName} · <span className="font-medium text-zinc-900 dark:text-zinc-100">{currentTitle}</span>
+          </div>
+          <NotificationBell onNavigate={onNavigate} align="right" />
+        </div>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-6">{children}</div>
       </main>
 
       {/* Mobile Fixed Bottom Tab Bar */}
@@ -251,6 +274,8 @@ export function AppShell({ activePage, onNavigate, children }: AppShellProps) {
                 );
               })}
             </div>
+
+            <PWAInstallButton compact />
 
             <button
               onClick={() => {

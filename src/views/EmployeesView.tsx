@@ -45,6 +45,8 @@ import {
   computeEmployeeLeaveAccrualPlan,
   normalizeLeavePolicyConfig,
 } from '../../shared/leaveAccrualEngine';
+import { formatCelebrationMonthDayLabel } from '../../shared/celebrationEngine';
+import { useCelebrations } from '../context/CelebrationContext';
 
 const WEEKDAYS = [
   { day: 0, label: 'Sun' },
@@ -80,6 +82,7 @@ function getInitials(name: string): string {
 export function EmployeesView() {
   const { employee, settings, requestPasswordReset, refreshSession } = useAuth();
   const { showToast } = useToast();
+  const { refreshCelebrations } = useCelebrations();
 
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
@@ -108,6 +111,7 @@ export function EmployeesView() {
     department: '',
     designation: '',
     joiningDate: new Date().toISOString().slice(0, 10),
+    dateOfBirth: '',
     location: 'India',
     timezone: 'Asia/Kolkata',
     currency: 'INR',
@@ -276,6 +280,7 @@ export function EmployeesView() {
       if (selectedEmp.id === employee.id) {
         await refreshSession();
       }
+      await refreshCelebrations();
     } catch (err: unknown) {
       showToast(err instanceof Error ? err.message : 'Photo upload failed', 'error');
     } finally {
@@ -304,6 +309,7 @@ export function EmployeesView() {
       department: emp.department,
       designation: emp.designation,
       joiningDate: emp.joiningDate,
+      dateOfBirth: isSuperAdmin || emp.id === employee.id ? emp.dateOfBirth || '' : undefined,
       status: emp.status,
       location: emp.location || effective.location,
       timezone: emp.timezone || effective.timezone,
@@ -372,6 +378,7 @@ export function EmployeesView() {
           department: newEmp.department || departments[0]?.name || 'Operations',
           designation: newEmp.designation,
           joiningDate: newEmp.joiningDate,
+          dateOfBirth: newEmp.dateOfBirth || undefined,
           location: newEmp.location,
           timezone: newEmp.timezone,
           currency: newEmp.currency,
@@ -412,6 +419,7 @@ export function EmployeesView() {
         department: departments[0]?.name || '',
         designation: '',
         joiningDate: resetJoin,
+        dateOfBirth: '',
         location: 'India',
         timezone: 'Asia/Kolkata',
         currency: 'INR',
@@ -429,6 +437,7 @@ export function EmployeesView() {
         mustChangePassword: true,
       });
       await loadData();
+      await refreshCelebrations();
     } catch (err: unknown) {
       showToast(err instanceof Error ? err.message : 'Could not create employee', 'error');
     } finally {
@@ -449,6 +458,7 @@ export function EmployeesView() {
         department: editForm.department,
         designation: editForm.designation,
         joiningDate: editForm.joiningDate,
+        dateOfBirth: editForm.dateOfBirth ?? '',
         status: editForm.status,
         location: editForm.location,
         timezone: editForm.timezone,
@@ -474,6 +484,7 @@ export function EmployeesView() {
       });
       showToast('Employee profile updated.', 'success');
       await loadData();
+      await refreshCelebrations();
       if (selectedEmp.id === employee.id) {
         await refreshSession();
       }
@@ -504,6 +515,7 @@ export function EmployeesView() {
       await updateEmployeeProfile(emp.id, { status: nextStatus }, employee);
       showToast(`${emp.fullName} marked as ${nextStatus}.`, 'info');
       await loadData();
+      await refreshCelebrations();
       if (selectedEmp?.id === emp.id) {
         setSelectedEmp({ ...emp, status: nextStatus });
         setEditForm((p) => ({ ...p, status: nextStatus }));
@@ -964,7 +976,7 @@ export function EmployeesView() {
                 </div>
               </div>
 
-              <div className="grid sm:grid-cols-2 gap-3">
+              <div className="grid sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block font-medium mb-1">Joining Date *</label>
                   <input
@@ -988,6 +1000,16 @@ export function EmployeesView() {
                     }}
                     className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
                   />
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">Date of Birth</label>
+                  <input
+                    type="date"
+                    value={newEmp.dateOfBirth}
+                    onChange={(e) => setNewEmp((p) => ({ ...p, dateOfBirth: e.target.value }))}
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                  />
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Birth year hidden from team</div>
                 </div>
                 <div>
                   <label className="block font-medium mb-1">Reporting Manager</label>
@@ -1299,7 +1321,7 @@ export function EmployeesView() {
                     </div>
                   </div>
 
-                  <div className="grid sm:grid-cols-3 gap-3">
+                  <div className="grid sm:grid-cols-2 gap-3">
                     <div>
                       <label className="block font-medium mb-1">Joining Date</label>
                       <input
@@ -1310,6 +1332,29 @@ export function EmployeesView() {
                         className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 disabled:opacity-70 font-mono"
                       />
                     </div>
+                    {isSuperAdmin || selectedEmp.id === employee.id ? (
+                      <div>
+                        <label className="block font-medium mb-1">
+                          Date of Birth <span className="text-[10px] font-normal text-zinc-500">(Year private)</span>
+                        </label>
+                        <input
+                          type="date"
+                          disabled={!isSuperAdmin}
+                          value={editForm.dateOfBirth || ''}
+                          onChange={(e) => setEditForm((p) => ({ ...p, dateOfBirth: e.target.value }))}
+                          className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 disabled:opacity-70 font-mono"
+                        />
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="block font-medium mb-1">Birthday (Month &amp; Day)</label>
+                        <div className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 flex items-center text-zinc-600 dark:text-zinc-300">
+                          {selectedEmp.birthdayMonthDay
+                            ? formatCelebrationMonthDayLabel(selectedEmp.birthdayMonthDay)
+                            : 'Not configured'}
+                        </div>
+                      </div>
+                    )}
                     <div>
                       <label className="block font-medium mb-1">Phone</label>
                       <input

@@ -1,18 +1,33 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Plus, Trash2, Upload, Shield } from 'lucide-react';
+import { Plus, Trash2, Upload, Shield, Sparkles, RefreshCw } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useCelebrations } from '../context/CelebrationContext';
 import { useToast } from '../components/Toast';
 import { TalentGradeLogo } from '../components/TalentGradeLogo';
-import { AuditLog, CompanySettings, Department, HolidayItem } from '../types/hr';
+import { AuditLog, CelebrationVisibilityScope, CompanySettings, Department, HolidayItem } from '../types/hr';
 import { DEFAULT_LEAVE_POLICY, normalizeLeavePolicyConfig } from '../../shared/leaveAccrualEngine';
+import {
+  DEFAULT_CELEBRATION_SETTINGS,
+  normalizeCelebrationSettings,
+} from '../../shared/celebrationEngine';
+import {
+  DEFAULT_ATTENDANCE_REMINDER_SETTINGS,
+  normalizeAttendanceReminderSettings,
+} from '../../shared/attendanceReminderEngine';
 import {
   createDepartment,
   deleteDepartment,
+  fetchAllEmployees,
   fetchAuditLogs,
   getDepartments,
+  getEffectiveSchedule,
   saveCompanySettings,
   uploadMediaAsset,
 } from '../lib/hrService';
+import { syncReminderSnapshotToServer } from '../lib/pushService';
+import { SmartAttendanceRemindersCard } from '../components/SmartAttendanceRemindersCard';
+import { AdminSmartRemindersPanel } from '../components/AdminSmartRemindersPanel';
+import { PWAInstallButton } from '../components/PWAInstallButton';
 
 const WEEKDAYS = [
   { day: 0, label: 'Sun' },
@@ -26,11 +41,15 @@ const WEEKDAYS = [
 
 export function SettingsView() {
   const { employee, settings, companyLogoUrl, refreshSession } = useAuth();
+  const { refreshCelebrations } = useCelebrations();
   const { showToast } = useToast();
 
-  const [tab, setTab] = useState<'company' | 'rules' | 'permissions' | 'departments' | 'audit'>('company');
+  const [tab, setTab] = useState<
+    'company' | 'rules' | 'reminders' | 'my_reminders' | 'celebrations' | 'permissions' | 'departments' | 'audit'
+  >('company');
   const [form, setForm] = useState<Omit<CompanySettings, 'updatedAt' | 'updatedBy'> | null>(null);
   const [saving, setSaving] = useState(false);
+  const [checkingCelebrations, setCheckingCelebrations] = useState(false);
 
   const [departments, setDepartments] = useState<Department[]>([]);
   const [newDeptName, setNewDeptName] = useState('');
@@ -42,15 +61,35 @@ export function SettingsView() {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [auditFilter, setAuditFilter] = useState('');
 
+  const isSuperAdmin = employee?.role === 'super_admin';
+
+  useEffect(() => {
+    if (employee && employee.role !== 'super_admin') {
+      setTab('my_reminders');
+    }
+  }, [employee]);
+
   const loadAux = useCallback(async () => {
+    if (!employee || employee.role !== 'super_admin') return;
     try {
-      const [depts, logs] = await Promise.all([getDepartments(), fetchAuditLogs()]);
+      const [depts, logs, empList] = await Promise.all([
+        getDepartments(),
+        fetchAuditLogs(),
+        fetchAllEmployees(employee),
+      ]);
       setDepartments(depts);
       setAuditLogs(logs);
+      if (settings) {
+        void syncReminderSnapshotToServer({
+          employee,
+          settings,
+          employees: empList,
+        }).catch(() => {});
+      }
     } catch {
       // Handled safely
     }
-  }, []);
+  }, [employee, settings]);
 
   useEffect(() => {
     if (settings) {
@@ -74,6 +113,8 @@ export function SettingsView() {
         defaultSickLeave: settings.defaultSickLeave,
         defaultCasualLeave: settings.defaultCasualLeave,
         leavePolicy: normalizeLeavePolicyConfig(settings.leavePolicy),
+        celebrationSettings: normalizeCelebrationSettings(settings.celebrationSettings),
+        attendanceReminders: normalizeAttendanceReminderSettings(settings.attendanceReminders),
         currency: settings.currency || 'INR',
         teamLeaderPermissions: { ...settings.teamLeaderPermissions },
       });
@@ -81,20 +122,87 @@ export function SettingsView() {
     loadAux();
   }, [settings, loadAux]);
 
-  if (!employee || !form || employee.role !== 'super_admin') return null;
+  if (!employee || !settings) return null;
+
+  if (!isSuperAdmin) {
+    const mySchedule = getEffectiveSchedule(employee, settings);
+    return (
+      <div className="space-y-6 max-w-4xl">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-display font-semibold">Employee Settings &amp; Preferences</h1>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+              Manage Smart Attendance Reminders, browser push subscriptions, and portal app installation
+            </p>
+          </div>
+          <PWAInstallButton />
+        </div>
+
+        <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-5 grid sm:grid-cols-4 gap-4 text-xs">
+          <div>
+            <div className="text-zinc-500 dark:text-zinc-400">Location</div>
+            <div className="font-semibold text-zinc-950 dark:text-zinc-100 mt-0.5">{mySchedule.location}</div>
+          </div>
+          <div>
+            <div className="text-zinc-500 dark:text-zinc-400">Assigned Timezone</div>
+            <div className="font-mono font-semibold text-zinc-950 dark:text-zinc-100 mt-0.5">{mySchedule.timezone}</div>
+          </div>
+          <div>
+            <div className="text-zinc-500 dark:text-zinc-400">Shift Timing</div>
+            <div className="font-mono tabular-nums font-semibold text-zinc-950 dark:text-zinc-100 mt-0.5">
+              {mySchedule.officeStartTime} – {mySchedule.officeEndTime}
+            </div>
+          </div>
+          <div>
+            <div className="text-zinc-500 dark:text-zinc-400">Grace Window</div>
+            <div className="font-mono tabular-nums font-semibold text-zinc-950 dark:text-zinc-100 mt-0.5">
+              {mySchedule.gracePeriodMinutes} mins
+            </div>
+          </div>
+        </div>
+
+        <SmartAttendanceRemindersCard />
+      </div>
+    );
+  }
+
+  if (!form) return null;
 
   const handleSaveSettings = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setSaving(true);
     try {
       await saveCompanySettings(form, employee);
+      await syncReminderSnapshotToServer({
+        employee,
+        settings: {
+          ...form,
+          attendanceReminders: normalizeAttendanceReminderSettings(
+            form.attendanceReminders || DEFAULT_ATTENDANCE_REMINDER_SETTINGS
+          ),
+          updatedBy: employee.uid,
+        },
+      }).catch(() => {});
       await refreshSession();
+      await refreshCelebrations();
       showToast('TalentGrade settings saved.', 'success');
       await loadAux();
     } catch (err: unknown) {
       showToast(err instanceof Error ? err.message : 'Failed to save settings', 'error');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRunCelebrationCheck = async () => {
+    setCheckingCelebrations(true);
+    try {
+      await refreshCelebrations();
+      showToast('Celebration check completed against server time.', 'success');
+    } catch {
+      showToast('Could not refresh celebrations.', 'error');
+    } finally {
+      setCheckingCelebrations(false);
     }
   };
 
@@ -190,6 +298,9 @@ export function SettingsView() {
           [
             { id: 'company', label: 'Company Profile' },
             { id: 'rules', label: 'Default Working Rules' },
+            { id: 'reminders', label: 'Smart Attendance Reminders' },
+            { id: 'my_reminders', label: 'My Notification Devices' },
+            { id: 'celebrations', label: 'Celebrations' },
             { id: 'permissions', label: 'Role Permissions' },
             { id: 'departments', label: 'Departments' },
             { id: 'audit', label: `Audit Logs (${auditLogs.length})` },
@@ -619,6 +730,182 @@ export function SettingsView() {
         </form>
       )}
 
+      {/* TAB 2A: SMART ATTENDANCE REMINDERS (SUPER ADMIN POLICY & AUDIT) */}
+      {tab === 'reminders' && (
+        <AdminSmartRemindersPanel
+          value={form.attendanceReminders}
+          locations={form.locations || ['India', 'Dubai, UAE']}
+          departments={departments}
+          saving={saving}
+          onChange={(next) => setForm({ ...form, attendanceReminders: next })}
+          onSave={handleSaveSettings}
+        />
+      )}
+
+      {/* TAB 2A-SELF: MY NOTIFICATION DEVICES */}
+      {tab === 'my_reminders' && (
+        <div className="space-y-4 max-w-4xl">
+          <div className="flex justify-end">
+            <PWAInstallButton />
+          </div>
+          <SmartAttendanceRemindersCard />
+        </div>
+      )}
+
+      {/* TAB 2B: CELEBRATION SETTINGS */}
+      {tab === 'celebrations' && (
+        <form
+          onSubmit={handleSaveSettings}
+          className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-5 max-w-2xl space-y-5 text-xs"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-zinc-200 dark:border-zinc-800">
+            <div>
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <Sparkles className="w-4 h-4 text-[#B5121B]" />
+                Birthday &amp; Work Anniversary Celebrations
+              </div>
+              <p className="text-zinc-500 dark:text-zinc-400 mt-0.5">
+                Configure automatic celebration detection, notifications, upcoming reminders, and wish privacy.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleRunCelebrationCheck}
+              disabled={checkingCelebrations}
+              className="px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 font-medium inline-flex items-center gap-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${checkingCelebrations ? 'animate-spin' : ''}`} />
+              Run Check Now
+            </button>
+          </div>
+
+          {(() => {
+            const cel = normalizeCelebrationSettings(form.celebrationSettings);
+            const updateCel = (patch: Partial<typeof cel>) =>
+              setForm({
+                ...form,
+                celebrationSettings: { ...cel, ...patch },
+              });
+
+            return (
+              <div className="space-y-4">
+                {(
+                  [
+                    {
+                      key: 'birthdaysEnabled',
+                      title: 'Enable Birthday Celebrations & Notifications',
+                      desc: 'Detect employee birthdays automatically (birth year is always hidden from colleagues).',
+                    },
+                    {
+                      key: 'anniversariesEnabled',
+                      title: 'Enable Work Anniversary Celebrations',
+                      desc: 'Celebrate completed full years of service (minimum 1 full year required).',
+                    },
+                    {
+                      key: 'upcomingRemindersEnabled',
+                      title: 'Show Upcoming Celebration Reminders',
+                      desc: 'Highlight upcoming birthdays and anniversaries on the dashboard widget.',
+                    },
+                    {
+                      key: 'feedEnabled',
+                      title: 'Enable Celebration Feed',
+                      desc: 'Show the internal wishes feed inside Celebrations and celebration detail modals.',
+                    },
+                    {
+                      key: 'wishesEnabled',
+                      title: 'Allow Employees to Send Wishes',
+                      desc: 'Enable emoji and short message wishes from colleagues on active celebration dates.',
+                    },
+                  ] as const
+                ).map((item) => (
+                  <label
+                    key={item.key}
+                    className="flex items-start justify-between gap-4 p-3.5 rounded-xl border border-zinc-200 dark:border-zinc-800 cursor-pointer"
+                  >
+                    <div>
+                      <div className="font-semibold text-zinc-950 dark:text-zinc-100">{item.title}</div>
+                      <div className="text-zinc-500 dark:text-zinc-400 mt-0.5">{item.desc}</div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(cel[item.key])}
+                      onChange={(e) => updateCel({ [item.key]: e.target.checked })}
+                      className="w-4 h-4 mt-1 accent-[#B5121B]"
+                    />
+                  </label>
+                ))}
+
+                <div className="grid sm:grid-cols-3 gap-3 pt-1">
+                  <div>
+                    <label className="block font-medium mb-1">Upcoming Window (Days)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={30}
+                      value={cel.upcomingWindowDays}
+                      onChange={(e) =>
+                        updateCel({
+                          upcomingWindowDays: Math.min(30, Math.max(1, Number(e.target.value) || 7)),
+                        })
+                      }
+                      className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-medium mb-1">Celebration Visibility</label>
+                    <select
+                      value={cel.visibilityScope}
+                      onChange={(e) =>
+                        updateCel({ visibilityScope: e.target.value as CelebrationVisibilityScope })
+                      }
+                      className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                    >
+                      <option value="all_active">All Active Employees</option>
+                      <option value="department">Same Department Only</option>
+                      <option value="leaders_only">Team Leaders &amp; Admins Only</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-medium mb-1">Evaluation Timezone</label>
+                    <select
+                      value={cel.timezone}
+                      onChange={(e) => updateCel({ timezone: e.target.value })}
+                      className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                    >
+                      <option value="Asia/Kolkata">Asia/Kolkata (IST)</option>
+                      <option value="Asia/Dubai">Asia/Dubai (GST)</option>
+                      <option value="UTC">UTC</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setForm({
+                        ...form,
+                        celebrationSettings: { ...DEFAULT_CELEBRATION_SETTINGS },
+                      })
+                    }
+                    className="px-3.5 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                  >
+                    Reset Defaults
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className="min-h-[44px] px-6 py-2.5 rounded-xl bg-[#B5121B] hover:bg-[#960E16] text-white font-semibold"
+                  >
+                    {saving ? 'Saving...' : 'Save Celebration Settings'}
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
+        </form>
+      )}
+
       {/* TAB 3: TEAM LEADER PERMISSIONS */}
       {tab === 'permissions' && (
         <form
@@ -647,8 +934,8 @@ export function SettingsView() {
               },
               {
                 key: 'canApproveCorrections',
-                title: 'Approve or Reject Attendance Corrections',
-                desc: 'Allows approving employee punch-in/out correction requests.',
+                title: 'Approve or Reject Attendance Regularization',
+                desc: 'Allows reviewing and approving or rejecting employee attendance regularization requests.',
               },
               {
                 key: 'canEditAttendance',
