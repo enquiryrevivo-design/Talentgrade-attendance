@@ -37,7 +37,16 @@ function restoreRewrittenApiUrl(req: IncomingMessage) {
 }
 
 export default function handler(req: IncomingMessage, res: ServerResponse) {
-  restoreRewrittenApiUrl(req);
-  const app = getApp();
-  return app(req as Parameters<Express>[0], res as Parameters<Express>[1]);
+  try {
+    restoreRewrittenApiUrl(req);
+    const app = getApp();
+    return app(req as Parameters<Express>[0], res as Parameters<Express>[1]);
+  } catch (err) {
+    console.error('Unhandled API handler error:', err);
+    if (!res.headersSent) {
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.end(JSON.stringify({ error: 'Internal server error handling API request' }));
+    }
+  }
 }

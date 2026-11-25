@@ -233,21 +233,28 @@ export async function evaluateCelebrationsOnServer(params: {
   const user = auth.currentUser;
   if (user) {
     try {
-      const token = await user.getIdToken();
-      const res = await fetch('/api/celebrations/evaluate', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          profiles: params.profiles,
-          celebrationSettings: celSettings,
-          companyName: params.companyName || 'TalentGrade',
-          lookbackDays: params.lookbackDays ?? 7,
-          lookaheadDays: params.lookaheadDays ?? Math.max(30, celSettings.upcomingWindowDays),
-        }),
-      });
+      const sendReq = async (forceRefresh: boolean) => {
+        const token = await user.getIdToken(forceRefresh);
+        return fetch('/api/celebrations/evaluate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            profiles: params.profiles,
+            celebrationSettings: celSettings,
+            companyName: params.companyName || 'TalentGrade',
+            lookbackDays: params.lookbackDays ?? 7,
+            lookaheadDays: params.lookaheadDays ?? Math.max(30, celSettings.upcomingWindowDays),
+          }),
+        });
+      };
+
+      let res = await sendReq(false);
+      if (res.status === 401) {
+        res = await sendReq(true);
+      }
       if (res.ok) {
         return res.json();
       }

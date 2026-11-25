@@ -52,15 +52,16 @@ export function ReportsView() {
     if (!employee || !settings) return;
     setLoading(true);
     try {
+      const canViewAll = settings.teamLeaderPermissions.canViewAllEmployees;
       const canPayroll =
         employee.role === 'super_admin' ||
         (employee.role === 'team_leader' && settings.teamLeaderPermissions.canViewSalary);
       const [empList, deptList, attList, leaveList, payList] = await Promise.all([
-        fetchAllEmployees(employee),
+        fetchAllEmployees(employee, canViewAll),
         getDepartments(),
-        fetchAttendanceRecords(employee),
+        fetchAttendanceRecords(employee, undefined, canViewAll),
         fetchLeaveApplications(employee),
-        canPayroll ? fetchPayrollRecords(employee) : Promise.resolve([]),
+        canPayroll ? fetchPayrollRecords(employee, canPayroll) : Promise.resolve([]),
       ]);
       setEmployees(empList);
       setDepartments(deptList);

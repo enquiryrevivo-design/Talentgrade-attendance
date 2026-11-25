@@ -27,13 +27,16 @@ import { SmartAttendanceReminderService } from './pushScheduler.js';
 
 const BOOTSTRAPPED_ADMIN_EMAIL = 'enquiry.revivo@gmail.com';
 const FALLBACK_FIREBASE_PROJECT_ID = 'gen-lang-client-0264117228';
+const FALLBACK_FIRESTORE_DATABASE_ID = 'ai-studio-8571b2ef-56ab-4f5a-9f14-103ac191cd0a';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-function resolveFirebaseProjectId(): string {
+function resolveFirebaseConfig(): { projectId: string; databaseId: string } {
   const envProjectId = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || '').trim();
-  if (envProjectId) return envProjectId;
+  const envDbId = (process.env.FIRESTORE_DATABASE_ID || process.env.VITE_FIRESTORE_DATABASE_ID || '').trim();
 
+  let fileProjectId = '';
+  let fileDbId = '';
   const candidates = [
     path.resolve(process.cwd(), 'firebase-applet-config.json'),
     path.resolve(__dirname, '..', 'firebase-applet-config.json'),
@@ -41,14 +44,22 @@ function resolveFirebaseProjectId(): string {
   for (const filePath of candidates) {
     try {
       if (fs.existsSync(filePath)) {
-        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as { projectId?: string };
-        if (parsed.projectId) return parsed.projectId;
+        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as {
+          projectId?: string;
+          firestoreDatabaseId?: string;
+        };
+        if (parsed.projectId && !fileProjectId) fileProjectId = parsed.projectId;
+        if (parsed.firestoreDatabaseId && !fileDbId) fileDbId = parsed.firestoreDatabaseId;
       }
     } catch {
       // Fall through to next candidate / fallback
     }
   }
-  return FALLBACK_FIREBASE_PROJECT_ID;
+
+  return {
+    projectId: envProjectId || fileProjectId || FALLBACK_FIREBASE_PROJECT_ID,
+    databaseId: envDbId || fileDbId || FALLBACK_FIRESTORE_DATABASE_ID,
+  };
 }
 
 let cachedAdminAuth: Auth | null = null;
@@ -57,13 +68,14 @@ function getAdminAuth(): Auth {
   // Initialize Firebase Admin ONLY for ID token verification (works on Starter Tier without IAM)
   const adminApp = getApps().length
     ? getApp()
-    : initializeApp({ projectId: resolveFirebaseProjectId() });
+    : initializeApp({ projectId: resolveFirebaseConfig().projectId });
   cachedAdminAuth = getAuth(adminApp);
   return cachedAdminAuth;
 }
 
 interface AuthenticatedRequest extends Request {
   authUser?: DecodedIdToken;
+  bearerToken?: string;
 }
 
 async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
@@ -74,10 +86,11 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
   const token = header.slice('Bearer '.length).trim();
   try {
     const decoded = await getAdminAuth().verifyIdToken(token);
-    if (!decoded.email_verified) {
-      return res.status(403).json({ error: 'Forbidden: Email verification required' });
+    if (decoded.firebase?.sign_in_provider === 'anonymous') {
+      return res.status(403).json({ error: 'Forbidden: Anonymous authentication is not permitted' });
     }
     req.authUser = decoded;
+    req.bearerToken = token;
     next();
   } catch (err) {
     console.error('Token verification failed:', err);
@@ -106,6 +119,7 @@ function resolveTimezoneParts(date: Date, timeZone: string): {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
+    hourCycle: 'h23',
   }).formatToParts(date);
 
   const getPart = (type: string) => parts.find((p) => p.type === type)?.value || '00';
@@ -314,6 +328,10 @@ export function createApiApp() {
           : 'Asia/Kolkata'
       );
 
+      const rawGrace = Number(schedule?.gracePeriodMinutes ?? 15);
+      const rawHalf = Number(schedule?.halfDayMinHours ?? 4);
+      const rawFull = Number(schedule?.fullDayMinHours ?? 8);
+
       const computed = computeRegularizedAttendanceMetrics({
         date,
         timeZone: safeTz,
@@ -324,9 +342,9 @@ export function createApiApp() {
         schedule: {
           timezone: safeTz,
           officeStartTime: typeof schedule?.officeStartTime === 'string' ? schedule.officeStartTime : '09:30',
-          gracePeriodMinutes: Number(schedule?.gracePeriodMinutes ?? 15),
-          halfDayMinHours: Number(schedule?.halfDayMinHours ?? 4),
-          fullDayMinHours: Number(schedule?.fullDayMinHours ?? 8),
+          gracePeriodMinutes: Number.isFinite(rawGrace) ? rawGrace : 15,
+          halfDayMinHours: Number.isFinite(rawHalf) ? rawHalf : 4,
+          fullDayMinHours: Number.isFinite(rawFull) ? rawFull : 8,
         },
       });
 
@@ -365,9 +383,47 @@ export function createApiApp() {
   // =========================================================================
   // SMART ATTENDANCE REMINDERS — WEB PUSH & BACKGROUND SCHEDULER APIs
   // =========================================================================
-  const isVerifiedSuperAdmin = (authUser?: DecodedIdToken): boolean => {
+  const isVerifiedSuperAdmin = async (
+    authUser?: DecodedIdToken,
+    bearerToken?: string
+  ): Promise<boolean> => {
     if (!authUser) return false;
-    if ((authUser.email || '').toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL) return true;
+    if (
+      (authUser.email || '').toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL &&
+      authUser.email_verified === true
+    ) {
+      return true;
+    }
+
+    // Verify caller's authoritative roles/{uid} document via Firestore REST API using caller's Bearer token
+    // so promoted Super Admins stay verified across Vercel serverless cold starts.
+    if (bearerToken && authUser.uid) {
+      try {
+        const { projectId, databaseId } = resolveFirebaseConfig();
+        const roleUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents/roles/${encodeURIComponent(authUser.uid)}`;
+        const resp = await fetch(roleUrl, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${bearerToken}` },
+        });
+        if (resp.ok) {
+          const docJson = (await resp.json()) as {
+            fields?: {
+              role?: { stringValue?: string };
+              status?: { stringValue?: string };
+            };
+          };
+          if (
+            docJson.fields?.role?.stringValue === 'super_admin' &&
+            docJson.fields?.status?.stringValue === 'Active'
+          ) {
+            return true;
+          }
+        }
+      } catch (err) {
+        console.warn('Firestore REST Super Admin role check warning:', err);
+      }
+    }
+
     const snap = getReminderService().getStateSnapshot();
     return Object.values(snap.employees).some(
       (e) => e.uid === authUser.uid && e.role === 'super_admin' && e.status === 'Active'
@@ -449,12 +505,12 @@ export function createApiApp() {
   });
 
   // Sync employee schedule, attendance state, leaves, and (for Super Admin) company reminder rules
-  app.post('/api/reminders/sync', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  app.post('/api/reminders/sync', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const uid = req.authUser?.uid;
       if (!uid) return res.status(401).json({ error: 'Unauthorized' });
 
-      const callerIsAdmin = isVerifiedSuperAdmin(req.authUser);
+      const callerIsAdmin = await isVerifiedSuperAdmin(req.authUser, req.bearerToken);
       const { company, employees, attendanceRecords, approvedLeaves } = req.body || {};
       const service = getReminderService();
 
@@ -510,12 +566,12 @@ export function createApiApp() {
   });
 
   // Retrieve reminder delivery history & subscription status (self for employees, company-wide for Super Admin)
-  app.get('/api/reminders/history', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  app.get('/api/reminders/history', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const uid = req.authUser?.uid;
       if (!uid) return res.status(401).json({ error: 'Unauthorized' });
 
-      const callerIsAdmin = isVerifiedSuperAdmin(req.authUser);
+      const callerIsAdmin = await isVerifiedSuperAdmin(req.authUser, req.bearerToken);
       const scope = req.query.scope === 'all' && callerIsAdmin ? 'all' : 'self';
       const limitCount = Number(req.query.limit || 150);
       const service = getReminderService();
@@ -562,7 +618,7 @@ export function createApiApp() {
 
   // Super Admin manual evaluation cycle trigger
   app.post('/api/reminders/run-now', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-    if (!isVerifiedSuperAdmin(req.authUser)) {
+    if (!(await isVerifiedSuperAdmin(req.authUser, req.bearerToken))) {
       return res.status(403).json({ error: 'Forbidden: Super Admin access required' });
     }
     try {

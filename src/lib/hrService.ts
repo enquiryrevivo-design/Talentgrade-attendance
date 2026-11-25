@@ -18,6 +18,7 @@ import {
   orderBy,
   limit,
   runTransaction,
+  writeBatch,
   serverTimestamp,
   deleteField,
 } from 'firebase/firestore';
@@ -50,6 +51,8 @@ import {
   EmployeeAccrualPlan,
   EmployeeLeaveComputedSummary,
   getLocalTodayInTimezone,
+  isValidIsoDate,
+  makeAccrualDocId,
   normalizeLeavePolicyConfig,
   round2,
 } from '../../shared/leaveAccrualEngine';
@@ -525,7 +528,7 @@ export async function resolveEmployeeSession(user: User): Promise<{
     if (!byUidSnap.empty) {
       const d = byUidSnap.docs[0];
       emp = { id: d.id, ...(d.data() as Omit<Employee, 'id'>) };
-    } else if (email) {
+    } else if (email && user.emailVerified) {
       const byEmailSnap = await getDocs(query(collection(db, 'employees'), where('email', '==', email)));
       if (!byEmailSnap.empty) {
         const d = byEmailSnap.docs[0];
@@ -533,36 +536,41 @@ export async function resolveEmployeeSession(user: User): Promise<{
       }
     }
 
-    if (!emp && email === BOOTSTRAPPED_ADMIN_EMAIL) {
+    if (!emp && email === BOOTSTRAPPED_ADMIN_EMAIL && user.emailVerified) {
       const boot = await bootstrapCompanyAndAdmin(user);
       return { employee: boot.employee, settings: boot.settings };
     }
 
     if (!emp) {
+      const safeSettings = await getCompanySettings().catch(() => null);
       return {
         employee: null,
-        settings: await getCompanySettings(),
-        errorReason: 'Your email is not registered in the TalentGrade employee directory. Please ask your Super Admin to create your account.',
+        settings: safeSettings,
+        errorReason: user.emailVerified
+          ? 'Your email is not registered in the TalentGrade employee directory. Please ask your Super Admin to create your account.'
+          : 'Your account profile could not be linked. Please sign in with the credentials provided by your Super Admin or use Company Google Sign-In.',
       };
     }
 
     if (emp.status !== 'Active') {
+      const safeSettings = await getCompanySettings().catch(() => null);
       return {
         employee: null,
-        settings: await getCompanySettings(),
+        settings: safeSettings,
         errorReason: `Your account is currently marked as ${emp.status}. Access has been disabled by administration.`,
       };
     }
 
     if (emp.lockedUntil && new Date(emp.lockedUntil) > new Date()) {
+      const safeSettings = await getCompanySettings().catch(() => null);
       return {
         employee: null,
-        settings: await getCompanySettings(),
+        settings: safeSettings,
         errorReason: 'Account temporarily locked due to repeated failed sign-in attempts. Contact your Super Admin.',
       };
     }
 
-    // Link UID & sync roles/{uid} on first login
+    // Link UID & sync roles/{uid} on first verified login if employee doc was pre-created without UID
     if (emp.uid !== user.uid) {
       await updateDoc(doc(db, 'employees', emp.id), {
         uid: user.uid,
@@ -576,7 +584,7 @@ export async function resolveEmployeeSession(user: User): Promise<{
     if (!roleSnap.exists()) {
       await setDoc(doc(db, 'roles', user.uid), {
         uid: user.uid,
-        email,
+        email: email || emp.email,
         role: emp.role,
         employeeId: emp.id,
         status: emp.status,
@@ -585,7 +593,11 @@ export async function resolveEmployeeSession(user: User): Promise<{
     }
 
     let settings = await getCompanySettings();
-    if (email === BOOTSTRAPPED_ADMIN_EMAIL && (!settings || settings.companyName === 'Meridian Internal Operations')) {
+    if (
+      email === BOOTSTRAPPED_ADMIN_EMAIL &&
+      user.emailVerified &&
+      (!settings || settings.companyName === 'Meridian Internal Operations')
+    ) {
       const boot = await bootstrapCompanyAndAdmin(user);
       settings = boot.settings;
     }
@@ -678,17 +690,32 @@ export async function fetchServerTime(timezone = 'Asia/Kolkata'): Promise<{
   };
 }
 
-export async function fetchAllEmployees(currentEmployee: Employee): Promise<Employee[]> {
+export async function fetchAllEmployees(
+  currentEmployee: Employee,
+  canViewAll = true
+): Promise<Employee[]> {
   try {
-    let snap;
-    if (currentEmployee.role === 'super_admin' || currentEmployee.role === 'team_leader') {
-      snap = await getDocs(collection(db, 'employees'));
+    const byId = new Map<string, Employee>();
+    if (
+      currentEmployee.role === 'super_admin' ||
+      (currentEmployee.role === 'team_leader' && canViewAll)
+    ) {
+      const snap = await getDocs(collection(db, 'employees'));
+      snap.docs.forEach((d) => byId.set(d.id, { id: d.id, ...(d.data() as Omit<Employee, 'id'>) }));
+    } else if (currentEmployee.role === 'team_leader') {
+      const [selfSnap, teamSnap] = await Promise.all([
+        getDocs(query(collection(db, 'employees'), where('uid', '==', currentEmployee.uid))),
+        getDocs(query(collection(db, 'employees'), where('managerUid', '==', currentEmployee.uid))),
+      ]);
+      selfSnap.docs.forEach((d) => byId.set(d.id, { id: d.id, ...(d.data() as Omit<Employee, 'id'>) }));
+      teamSnap.docs.forEach((d) => byId.set(d.id, { id: d.id, ...(d.data() as Omit<Employee, 'id'>) }));
     } else {
-      snap = await getDocs(query(collection(db, 'employees'), where('uid', '==', currentEmployee.uid)));
+      const snap = await getDocs(
+        query(collection(db, 'employees'), where('uid', '==', currentEmployee.uid))
+      );
+      snap.docs.forEach((d) => byId.set(d.id, { id: d.id, ...(d.data() as Omit<Employee, 'id'>) }));
     }
-    return snap.docs
-      .map((d) => ({ id: d.id, ...(d.data() as Omit<Employee, 'id'>) }))
-      .sort((a, b) => a.employeeCode.localeCompare(b.employeeCode));
+    return Array.from(byId.values()).sort((a, b) => a.employeeCode.localeCompare(b.employeeCode));
   } catch (err) {
     handleFirestoreError(err, OperationType.LIST, 'employees');
   }
@@ -720,6 +747,8 @@ export async function createEmployeeAccount(
     sickLeaveBalance: number;
     casualLeaveBalance: number;
     carryForwardBalance: number;
+    clEligibilityDate?: string;
+    clEligibilityCustom?: boolean;
     temporaryPassword?: string;
     mustChangePassword: boolean;
   },
@@ -728,14 +757,51 @@ export async function createEmployeeAccount(
 ): Promise<{ employee: Employee; authProvisioned: boolean; note?: string }> {
   const id = makeSafeId('emp');
   const normalizedEmail = input.email.trim().toLowerCase();
+  if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    throw new Error('Please enter a valid corporate email address.');
+  }
+  if (!input.employeeCode.trim() || !input.fullName.trim()) {
+    throw new Error('Employee code and full name are required.');
+  }
+  if (!isValidIsoDate(input.joiningDate)) {
+    throw new Error('Joining date must be in YYYY-MM-DD format.');
+  }
+
+  const rawSl = Number(input.sickLeaveBalance);
+  const rawCl = Number(input.casualLeaveBalance);
+  const rawCf = Number(input.carryForwardBalance);
+  if (!Number.isFinite(rawSl) || !Number.isFinite(rawCl) || !Number.isFinite(rawCf)) {
+    throw new Error('Leave balances must be valid finite numbers.');
+  }
+
+  const initialSl = round2(rawSl);
+  const initialCl = round2(rawCl);
+  const initialCf = Math.max(0, round2(rawCf));
+  if (initialSl < -60 || initialSl > 365 || initialCl < -60 || initialCl > 365 || initialCf > 365) {
+    throw new Error('Leave balances must be valid numbers between -60 and 365.');
+  }
+
+  const tempPassword = input.temporaryPassword?.trim() || '';
+  if (tempPassword.length > 0 && tempPassword.length < 6) {
+    throw new Error('Temporary password must be at least 6 characters long.');
+  }
+
   const normalizedDob = input.dateOfBirth?.trim() || undefined;
   const birthdayMonthDay = extractMonthDayFromDate(normalizedDob);
   const policy = normalizeLeavePolicyConfig(options?.leavePolicy);
-  const clEligibilityDate = calculateCasualLeaveEligibilityDate(
+  const defaultClEligibilityDate = calculateCasualLeaveEligibilityDate(
     input.joiningDate,
     policy.casualLeaveEligibilityMonths
   );
+  const hasCustomClEligibility = Boolean(
+    input.clEligibilityCustom && isValidIsoDate(input.clEligibilityDate)
+  );
+  const clEligibilityDate = hasCustomClEligibility
+    ? input.clEligibilityDate!.trim()
+    : defaultClEligibilityDate;
   const todayLocal = getTodayInTimezone(input.timezone || 'Asia/Kolkata');
+  const currentMonth = todayLocal.slice(0, 7);
+  const currentYear = Number(todayLocal.slice(0, 4)) || new Date().getUTCFullYear();
 
   try {
     const existingSnap = await getDocs(query(collection(db, 'employees'), where('email', '==', normalizedEmail)));
@@ -743,8 +809,50 @@ export async function createEmployeeAccount(
       throw new Error('An employee account with this email already exists.');
     }
 
+    // 1. Provision Firebase Auth login FIRST so we receive the authoritative UID before writing Firestore documents atomically.
+    let provisionedUid = '';
+    let authProvisioned = false;
+    let note: string | undefined;
+
+    if (tempPassword.length >= 6) {
+      const secondaryName = `secondary_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const secondaryApp = initializeApp(firebaseConfig, secondaryName);
+      try {
+        const secondaryAuth = getAuth(secondaryApp);
+        const cred = await createUserWithEmailAndPassword(secondaryAuth, normalizedEmail, tempPassword);
+        provisionedUid = cred.user.uid;
+        authProvisioned = true;
+        await signOut(secondaryAuth).catch(() => {});
+      } catch (authErr: unknown) {
+        const code = (authErr as { code?: string })?.code || '';
+        if (code === 'auth/email-already-in-use') {
+          throw new Error(
+            'A Firebase Authentication account with this email already exists. Clear the temporary password field so the employee signs in via Google Sign-In or password reset.'
+          );
+        }
+        if (code === 'auth/weak-password') {
+          throw new Error('Temporary password is too weak for Firebase Authentication. Use at least 6 strong characters.');
+        }
+        if (code === 'auth/invalid-email') {
+          throw new Error('The work email format was rejected by Firebase Authentication.');
+        }
+        if (code === 'auth/operation-not-allowed') {
+          note =
+            'Employee profile saved. They can sign in immediately with Google Sign-In. (To enable Email/Password login, enable Email/Password provider in Firebase Console.)';
+        } else {
+          throw new Error(
+            authErr instanceof Error
+              ? `Could not provision Firebase Authentication login: ${authErr.message}`
+              : 'Could not provision Firebase Authentication login.'
+          );
+        }
+      } finally {
+        await deleteApp(secondaryApp).catch(() => {});
+      }
+    }
+
     const empData = cleanObject({
-      uid: '',
+      uid: provisionedUid,
       employeeCode: input.employeeCode.trim().toUpperCase(),
       fullName: input.fullName.trim(),
       email: normalizedEmail,
@@ -762,159 +870,143 @@ export async function createEmployeeAccount(
       currency: input.currency || 'INR',
       officeStartTime: input.officeStartTime || undefined,
       officeEndTime: input.officeEndTime || undefined,
-      gracePeriodMinutes: typeof input.gracePeriodMinutes === 'number' ? input.gracePeriodMinutes : undefined,
-      halfDayMinHours: typeof input.halfDayMinHours === 'number' ? input.halfDayMinHours : undefined,
-      fullDayMinHours: typeof input.fullDayMinHours === 'number' ? input.fullDayMinHours : undefined,
+      gracePeriodMinutes:
+        typeof input.gracePeriodMinutes === 'number' && Number.isFinite(input.gracePeriodMinutes)
+          ? input.gracePeriodMinutes
+          : undefined,
+      halfDayMinHours:
+        typeof input.halfDayMinHours === 'number' && Number.isFinite(input.halfDayMinHours)
+          ? input.halfDayMinHours
+          : undefined,
+      fullDayMinHours:
+        typeof input.fullDayMinHours === 'number' && Number.isFinite(input.fullDayMinHours)
+          ? input.fullDayMinHours
+          : undefined,
       workingDays: input.workingDays && input.workingDays.length > 0 ? input.workingDays : undefined,
       profilePhotoAssetId: input.profilePhotoAssetId || undefined,
       managerUid: input.managerUid || undefined,
-      sickLeaveBalance: Number(input.sickLeaveBalance),
-      casualLeaveBalance: Number(input.casualLeaveBalance),
-      carryForwardBalance: Number(input.carryForwardBalance),
+      sickLeaveBalance: initialSl,
+      casualLeaveBalance: initialCl,
+      carryForwardBalance: initialCf,
       leavePolicyMigrated: true,
-      leaveLastSyncedMonth: todayLocal.slice(0, 7),
-      leaveLastResetYear: Number(todayLocal.slice(0, 4)),
+      leaveBaselineMonth: currentMonth,
+      leaveLastSyncedMonth: currentMonth,
+      leaveLastResetYear: currentYear,
       clEligibilityDate,
+      clEligibilityCustom: hasCustomClEligibility ? true : undefined,
       mustChangePassword: input.mustChangePassword,
       failedLoginAttempts: 0,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
 
-    await setDoc(doc(db, 'employees', id), empData);
+    const actorUid = auth.currentUser?.uid || actor.uid || 'system';
+    const actorName = (actor.fullName || actor.email || 'Super Admin').trim().slice(0, 120);
+    const empName = (empData.fullName || 'Employee').trim().slice(0, 120);
+    const joiningMonth = isValidIsoDate(input.joiningDate) ? input.joiningDate.slice(0, 7) : currentMonth;
 
-    // Maintain privacy-safe celebration projection (never includes dateOfBirth / birth year)
-    try {
-      await setDoc(
-        doc(db, 'celebrationProfiles', id),
-        cleanObject({
-          employeeId: id,
-          employeeUid: '',
-          fullName: empData.fullName,
-          department: empData.department,
-          designation: empData.designation,
-          location: empData.location,
-          status: empData.status,
-          role: empData.role,
-          profilePhotoAssetId: empData.profilePhotoAssetId,
-          birthdayMonthDay,
-          joiningDate: empData.joiningDate,
-          updatedAt: serverTimestamp(),
-        })
-      );
-    } catch (celErr) {
-      console.warn('Celebration profile projection skipped:', celErr);
-    }
+    // 2. Atomically write employee, roles/{uid} (if Auth provisioned), initial SL/CL ledger entries, and celebration profile.
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'employees', id), empData);
 
-    // Record authoritative initial monthly accrual ledger entries & any opening admin override
-    try {
-      const actorUid = auth.currentUser?.uid || actor.uid;
-      const computed = await computeLeaveAccrualsOnServer({
-        employees: [{ id, ...(empData as Omit<Employee, 'id'>) }],
-        policy,
-        existingLedger: [],
-        approvedLeaves: [],
-        actor,
-        isNewEmployeeInit: true,
+    if (provisionedUid) {
+      batch.set(doc(db, 'roles', provisionedUid), {
+        uid: provisionedUid,
+        email: normalizedEmail,
+        role: input.role,
+        employeeId: id,
+        status: 'Active',
+        updatedAt: serverTimestamp(),
       });
-      const plan = computed.plans[0];
-      if (plan) {
-        const currentMonth = plan.summary.currentMonth;
-        const currentYear = plan.summary.currentYear;
-        for (const entry of plan.newLedgerEntries) {
-          const { id: entryDocId, ...entryFields } = entry;
-          await setDoc(doc(db, 'leaveLedger', entryDocId), {
-            ...cleanObject(entryFields as unknown as Record<string, unknown>),
-            createdBy: actorUid,
-            createdByName: actor.fullName,
-            createdAt: serverTimestamp(),
-          });
-        }
-        const slDiff = round2(Number(input.sickLeaveBalance) - plan.summary.sickLeaveBalance);
-        if (slDiff !== 0) {
-          await setDoc(doc(db, 'leaveLedger', makeSafeId('adj_init_sl')), {
-            employeeId: id,
-            employeeUid: '',
-            employeeEmail: normalizedEmail,
-            employeeName: empData.fullName,
-            leaveType: 'SL',
-            entryType: 'admin_adjustment',
-            month: currentMonth,
-            year: currentYear,
-            amount: slDiff,
-            balanceAfter: Number(input.sickLeaveBalance),
-            source: 'admin_manual',
-            reason: `Initial onboarding balance override by ${actor.fullName}`,
-            createdBy: actorUid,
-            createdByName: actor.fullName,
-            createdAt: serverTimestamp(),
-          });
-        }
-        const clDiff = round2(Number(input.casualLeaveBalance) - plan.summary.casualLeaveBalance);
-        if (clDiff !== 0) {
-          await setDoc(doc(db, 'leaveLedger', makeSafeId('adj_init_cl')), {
-            employeeId: id,
-            employeeUid: '',
-            employeeEmail: normalizedEmail,
-            employeeName: empData.fullName,
-            leaveType: 'CL',
-            entryType: 'admin_adjustment',
-            month: currentMonth,
-            year: currentYear,
-            amount: clDiff,
-            balanceAfter: Number(input.casualLeaveBalance),
-            source: 'admin_manual',
-            reason: `Initial onboarding balance override by ${actor.fullName}`,
-            createdBy: actorUid,
-            createdByName: actor.fullName,
-            createdAt: serverTimestamp(),
-          });
-        }
-      }
-    } catch (ledgerErr) {
-      console.warn('Initial leave ledger seeding skipped:', ledgerErr);
     }
 
-    let authProvisioned = false;
-    let note: string | undefined;
+    const isDefaultCurrentMonthSl =
+      joiningMonth === currentMonth &&
+      input.joiningDate <= todayLocal &&
+      policy.sickLeaveMonthlyRate > 0 &&
+      initialSl === round2(policy.sickLeaveMonthlyRate);
 
-    if (input.temporaryPassword && input.temporaryPassword.length >= 6) {
-      const secondaryName = `secondary_${Date.now()}`;
-      const secondaryApp = initializeApp(firebaseConfig, secondaryName);
-      try {
-        const secondaryAuth = getAuth(secondaryApp);
-        const cred = await createUserWithEmailAndPassword(secondaryAuth, normalizedEmail, input.temporaryPassword);
-        await updateDoc(doc(db, 'employees', id), {
-          uid: cred.user.uid,
-          updatedAt: serverTimestamp(),
-        });
-        await updateDoc(doc(db, 'celebrationProfiles', id), {
-          employeeUid: cred.user.uid,
-          updatedAt: serverTimestamp(),
-        }).catch(() => {});
-        await setDoc(doc(db, 'roles', cred.user.uid), {
-          uid: cred.user.uid,
-          email: normalizedEmail,
-          role: input.role,
-          employeeId: id,
-          status: 'Active',
-          updatedAt: serverTimestamp(),
-        });
-        await signOut(secondaryAuth);
-        authProvisioned = true;
-      } catch (authErr: unknown) {
-        const code = (authErr as { code?: string })?.code || '';
-        if (code === 'auth/operation-not-allowed') {
-          note = 'Employee profile saved. They can sign in immediately with Google Sign-In. (To enable Email/Password login, enable Email/Password provider in Firebase Console.)';
-        } else if (code === 'auth/email-already-in-use') {
-          note = 'Employee profile saved. Existing Firebase Auth user will link automatically upon sign-in.';
-        } else {
-          note = 'Employee profile saved. Employee can sign in with Google Sign-In using their work email.';
-        }
-      } finally {
-        await deleteApp(secondaryApp);
-      }
-    }
+    const slLedgerId = isDefaultCurrentMonthSl
+      ? makeAccrualDocId(id, 'SL', currentMonth)
+      : `init_${id}_SL`.replace(/[^a-zA-Z0-9_-]/g, '');
+
+    batch.set(
+      doc(db, 'leaveLedger', slLedgerId),
+      cleanObject({
+        employeeId: id,
+        employeeUid: provisionedUid,
+        employeeEmail: normalizedEmail,
+        employeeName: empName,
+        leaveType: 'SL',
+        entryType: isDefaultCurrentMonthSl ? 'monthly_accrual' : 'opening_balance',
+        month: currentMonth,
+        year: currentYear,
+        amount: initialSl,
+        balanceBefore: 0,
+        balanceAfter: initialSl,
+        source: isDefaultCurrentMonthSl ? 'accrual_engine' : 'admin_manual',
+        reason: isDefaultCurrentMonthSl
+          ? `Monthly Sick Leave accrual for ${currentMonth}`
+          : `Initial Sick Leave balance (${initialSl}d) configured on onboarding by ${actorName}`,
+        createdBy: actorUid,
+        createdByName: actorName,
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    const isDefaultCurrentMonthCl =
+      clEligibilityDate.slice(0, 7) === currentMonth &&
+      todayLocal >= clEligibilityDate &&
+      policy.casualLeaveMonthlyRate > 0 &&
+      initialCl === round2(policy.casualLeaveMonthlyRate);
+
+    const clLedgerId = isDefaultCurrentMonthCl
+      ? makeAccrualDocId(id, 'CL', currentMonth)
+      : `init_${id}_CL`.replace(/[^a-zA-Z0-9_-]/g, '');
+
+    batch.set(
+      doc(db, 'leaveLedger', clLedgerId),
+      cleanObject({
+        employeeId: id,
+        employeeUid: provisionedUid,
+        employeeEmail: normalizedEmail,
+        employeeName: empName,
+        leaveType: 'CL',
+        entryType: isDefaultCurrentMonthCl ? 'monthly_accrual' : 'opening_balance',
+        month: currentMonth,
+        year: currentYear,
+        amount: initialCl,
+        balanceBefore: 0,
+        balanceAfter: initialCl,
+        source: isDefaultCurrentMonthCl ? 'accrual_engine' : 'admin_manual',
+        reason: isDefaultCurrentMonthCl
+          ? `Monthly Casual Leave accrual for ${currentMonth}`
+          : `Initial Casual Leave balance (${initialCl}d) configured on onboarding by ${actorName}`,
+        createdBy: actorUid,
+        createdByName: actorName,
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    batch.set(
+      doc(db, 'celebrationProfiles', id),
+      cleanObject({
+        employeeId: id,
+        employeeUid: provisionedUid,
+        fullName: empData.fullName,
+        department: empData.department,
+        designation: empData.designation,
+        location: empData.location,
+        status: empData.status,
+        role: empData.role,
+        profilePhotoAssetId: empData.profilePhotoAssetId,
+        birthdayMonthDay,
+        joiningDate: empData.joiningDate,
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    await batch.commit();
 
     await writeAuditLog({
       actor,
@@ -929,6 +1021,7 @@ export async function createEmployeeAccount(
         location: empData.location,
         currency: empData.currency,
         clEligibilityDate,
+        authProvisioned,
       },
       summary: `Created employee account for ${empData.fullName} (${empData.employeeCode}) in ${empData.location} (${empData.currency})`,
     });
@@ -939,7 +1032,15 @@ export async function createEmployeeAccount(
       note,
     };
   } catch (err) {
-    if (err instanceof Error && err.message.includes('already exists')) throw err;
+    if (
+      err instanceof Error &&
+      (err.message.includes('already exists') ||
+        err.message.includes('Firebase Authentication') ||
+        err.message.includes('valid') ||
+        err.message.includes('required'))
+    ) {
+      throw err;
+    }
     handleFirestoreError(err, OperationType.CREATE, `employees/${id}`);
   }
 }
@@ -956,12 +1057,11 @@ export async function updateEmployeeProfile(
     if (!snap.exists()) throw new Error('Employee record not found');
     const prev = snap.data() as Employee;
 
+    const nextJoining = updates.joiningDate || prev.joiningDate;
+    const policyEligibilityMonths = normalizeLeavePolicyConfig(options?.leavePolicy).casualLeaveEligibilityMonths;
     const computedEligibility =
-      updates.joiningDate && updates.joiningDate !== prev.joiningDate
-        ? calculateCasualLeaveEligibilityDate(
-            updates.joiningDate,
-            normalizeLeavePolicyConfig(options?.leavePolicy).casualLeaveEligibilityMonths
-          )
+      updates.joiningDate && updates.joiningDate !== prev.joiningDate && !updates.clEligibilityCustom && !prev.clEligibilityCustom
+        ? calculateCasualLeaveEligibilityDate(updates.joiningDate, policyEligibilityMonths)
         : undefined;
 
     const safeUpdates: Record<string, unknown> = cleanObject({
@@ -972,6 +1072,51 @@ export async function updateEmployeeProfile(
     });
     delete safeUpdates.id;
     delete safeUpdates.createdAt;
+
+    if (updates.clEligibilityCustom && isValidIsoDate(updates.clEligibilityDate)) {
+      safeUpdates.clEligibilityCustom = true;
+      safeUpdates.clEligibilityDate = updates.clEligibilityDate.trim();
+    } else if ('clEligibilityCustom' in updates && updates.clEligibilityCustom === false) {
+      safeUpdates.clEligibilityCustom = deleteField();
+      safeUpdates.clEligibilityDate = calculateCasualLeaveEligibilityDate(
+        nextJoining,
+        policyEligibilityMonths
+      );
+    }
+
+    if ('sickLeaveBalance' in safeUpdates) {
+      const sl = Number(safeUpdates.sickLeaveBalance);
+      if (!Number.isFinite(sl) || sl < -60 || sl > 365) {
+        throw new Error('Sick leave balance must be between -60 and 365.');
+      }
+      safeUpdates.sickLeaveBalance = round2(sl);
+    }
+    if ('casualLeaveBalance' in safeUpdates) {
+      const cl = Number(safeUpdates.casualLeaveBalance);
+      if (!Number.isFinite(cl) || cl < -60 || cl > 365) {
+        throw new Error('Casual leave balance must be between -60 and 365.');
+      }
+      safeUpdates.casualLeaveBalance = round2(cl);
+    }
+    if ('carryForwardBalance' in safeUpdates) {
+      const cf = Number(safeUpdates.carryForwardBalance);
+      if (!Number.isFinite(cf) || cf < 0 || cf > 365) {
+        throw new Error('Carry-forward leave balance must be between 0 and 365.');
+      }
+      safeUpdates.carryForwardBalance = Math.max(0, round2(cf));
+    }
+    if ('gracePeriodMinutes' in safeUpdates && safeUpdates.gracePeriodMinutes !== undefined) {
+      const g = Number(safeUpdates.gracePeriodMinutes);
+      if (!Number.isFinite(g) || g < 0 || g > 180) delete safeUpdates.gracePeriodMinutes;
+    }
+    if ('halfDayMinHours' in safeUpdates && safeUpdates.halfDayMinHours !== undefined) {
+      const h = Number(safeUpdates.halfDayMinHours);
+      if (!Number.isFinite(h) || h < 1 || h > 12) delete safeUpdates.halfDayMinHours;
+    }
+    if ('fullDayMinHours' in safeUpdates && safeUpdates.fullDayMinHours !== undefined) {
+      const f = Number(safeUpdates.fullDayMinHours);
+      if (!Number.isFinite(f) || f < 1 || f > 16) delete safeUpdates.fullDayMinHours;
+    }
 
     if ('dateOfBirth' in updates) {
       const dobTrimmed = typeof updates.dateOfBirth === 'string' ? updates.dateOfBirth.trim() : '';
@@ -1031,60 +1176,76 @@ export async function updateEmployeeProfile(
     }
 
     // Keep immutable leaveLedger synchronized when Super Admin directly edits SL/CL balances in profile
-    const actorUid = auth.currentUser?.uid || actor.uid;
+    const actorUid = auth.currentUser?.uid || actor.uid || 'system';
+    const actorName = (actor.fullName || actor.email || 'Super Admin').trim().slice(0, 120);
     const todayLocal = getTodayInTimezone(updates.timezone || prev.timezone || 'Asia/Kolkata');
     const currentMonth = todayLocal.slice(0, 7);
-    const currentYear = Number(todayLocal.slice(0, 4));
-    const empEmail = (updates.email || prev.email || `${employeeId}@talentgrade.local`).trim().toLowerCase();
+    const currentYear = Number(todayLocal.slice(0, 4)) || new Date().getUTCFullYear();
+    const empEmail = (updates.email || prev.email || `${employeeId}@talentgrade.local`).trim().toLowerCase().slice(0, 120);
+    const empName = (updates.fullName || prev.fullName || 'Employee').trim().slice(0, 120);
 
     if (
       actor.role === 'super_admin' &&
       typeof updates.sickLeaveBalance === 'number' &&
+      Number.isFinite(updates.sickLeaveBalance) &&
       round2(updates.sickLeaveBalance) !== round2(prev.sickLeaveBalance)
     ) {
-      const delta = round2(updates.sickLeaveBalance - prev.sickLeaveBalance);
-      await setDoc(doc(db, 'leaveLedger', makeSafeId('adj_prof_sl')), {
-        employeeId,
-        employeeUid: updates.uid || prev.uid || '',
-        employeeEmail: empEmail,
-        employeeName: updates.fullName || prev.fullName,
-        leaveType: 'SL',
-        entryType: 'admin_adjustment',
-        month: currentMonth,
-        year: currentYear,
-        amount: delta,
-        balanceAfter: round2(updates.sickLeaveBalance),
-        source: 'admin_manual',
-        reason: `Profile Sick Leave balance adjusted from ${prev.sickLeaveBalance} to ${updates.sickLeaveBalance}`,
-        createdBy: actorUid,
-        createdByName: actor.fullName,
-        createdAt: serverTimestamp(),
-      });
+      const prevSl = round2(prev.sickLeaveBalance);
+      const nextSl = round2(updates.sickLeaveBalance);
+      const delta = round2(nextSl - prevSl);
+      await setDoc(
+        doc(db, 'leaveLedger', makeSafeId('adj_prof_sl')),
+        cleanObject({
+          employeeId,
+          employeeUid: updates.uid || prev.uid || '',
+          employeeEmail: empEmail,
+          employeeName: empName,
+          leaveType: 'SL',
+          entryType: 'admin_adjustment',
+          month: currentMonth,
+          year: currentYear,
+          amount: delta,
+          balanceBefore: prevSl,
+          balanceAfter: nextSl,
+          source: 'admin_manual',
+          reason: `Profile Sick Leave balance adjusted from ${prevSl} to ${nextSl}`,
+          createdBy: actorUid,
+          createdByName: actorName,
+          createdAt: serverTimestamp(),
+        })
+      );
     }
 
     if (
       actor.role === 'super_admin' &&
       typeof updates.casualLeaveBalance === 'number' &&
+      Number.isFinite(updates.casualLeaveBalance) &&
       round2(updates.casualLeaveBalance) !== round2(prev.casualLeaveBalance)
     ) {
-      const delta = round2(updates.casualLeaveBalance - prev.casualLeaveBalance);
-      await setDoc(doc(db, 'leaveLedger', makeSafeId('adj_prof_cl')), {
-        employeeId,
-        employeeUid: updates.uid || prev.uid || '',
-        employeeEmail: empEmail,
-        employeeName: updates.fullName || prev.fullName,
-        leaveType: 'CL',
-        entryType: 'admin_adjustment',
-        month: currentMonth,
-        year: currentYear,
-        amount: delta,
-        balanceAfter: round2(updates.casualLeaveBalance),
-        source: 'admin_manual',
-        reason: `Profile Casual Leave balance adjusted from ${prev.casualLeaveBalance} to ${updates.casualLeaveBalance}`,
-        createdBy: actorUid,
-        createdByName: actor.fullName,
-        createdAt: serverTimestamp(),
-      });
+      const prevCl = round2(prev.casualLeaveBalance);
+      const nextCl = round2(updates.casualLeaveBalance);
+      const delta = round2(nextCl - prevCl);
+      await setDoc(
+        doc(db, 'leaveLedger', makeSafeId('adj_prof_cl')),
+        cleanObject({
+          employeeId,
+          employeeUid: updates.uid || prev.uid || '',
+          employeeEmail: empEmail,
+          employeeName: empName,
+          leaveType: 'CL',
+          entryType: 'admin_adjustment',
+          month: currentMonth,
+          year: currentYear,
+          amount: delta,
+          balanceBefore: prevCl,
+          balanceAfter: nextCl,
+          source: 'admin_manual',
+          reason: `Profile Casual Leave balance adjusted from ${prevCl} to ${nextCl}`,
+          createdBy: actorUid,
+          createdByName: actorName,
+          createdAt: serverTimestamp(),
+        })
+      );
     }
 
     const targetUid = updates.uid || prev.uid;
@@ -1171,6 +1332,26 @@ export async function punchIn(params: {
         throw new Error('You have already punched in today.');
       }
 
+      const punchFields = cleanObject({
+        timezone: schedule.timezone,
+        punchInTime: serverClock.iso,
+        punchInLat: Number.isFinite(params.lat) ? params.lat : 0,
+        punchInLng: Number.isFinite(params.lng) ? params.lng : 0,
+        punchInAccuracy: Number.isFinite(params.accuracy) ? Math.round(params.accuracy) : 0,
+        punchInPhotoId: photoId,
+        workingMinutes: 0,
+        status: (isLate ? 'Late' : 'Present') as AttendanceStatus,
+        isLate,
+        lateByMinutes,
+        updatedAt: serverTimestamp(),
+      });
+
+      if (existingSnap.exists()) {
+        tx.update(recRef, punchFields);
+        const existingData = existingSnap.data() as Omit<AttendanceRecord, 'id'>;
+        return { id: recordId, ...existingData, ...(punchFields as Partial<AttendanceRecord>) };
+      }
+
       const payload = cleanObject({
         employeeId: params.employee.id,
         employeeUid: params.employee.uid,
@@ -1178,18 +1359,8 @@ export async function punchIn(params: {
         department: params.employee.department,
         managerUid: params.employee.managerUid,
         date: dateStr,
-        timezone: schedule.timezone,
-        punchInTime: serverClock.iso,
-        punchInLat: params.lat,
-        punchInLng: params.lng,
-        punchInAccuracy: Math.round(params.accuracy || 0),
-        punchInPhotoId: photoId,
-        workingMinutes: 0,
-        status: (isLate ? 'Late' : 'Present') as AttendanceStatus,
-        isLate,
-        lateByMinutes,
-        createdAt: existingSnap.exists() ? existingSnap.data().createdAt : serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        ...punchFields,
+        createdAt: serverTimestamp(),
       });
 
       tx.set(recRef, payload);
@@ -1245,7 +1416,9 @@ export async function punchOut(params: {
 
       const inMs = new Date(prev.punchInTime || serverClock.iso).getTime();
       const outMs = new Date(serverClock.iso).getTime();
-      const workingMinutes = Math.max(0, Math.min(1440, Math.round((outMs - inMs) / 60000)));
+      const rawMinutes =
+        Number.isFinite(inMs) && Number.isFinite(outMs) ? Math.round((outMs - inMs) / 60000) : 0;
+      const workingMinutes = Math.max(0, Math.min(1440, Number.isFinite(rawMinutes) ? rawMinutes : 0));
       const fullDayMin = (schedule.fullDayMinHours || 8) * 60;
 
       let nextStatus: AttendanceStatus = prev.isLate ? 'Late' : 'Present';
@@ -1253,11 +1426,15 @@ export async function punchOut(params: {
         nextStatus = 'Half Day';
       }
 
+      const safeLat = Number.isFinite(params.lat) ? params.lat : 0;
+      const safeLng = Number.isFinite(params.lng) ? params.lng : 0;
+      const safeAcc = Number.isFinite(params.accuracy) ? Math.round(params.accuracy) : 0;
+
       tx.update(recRef, {
         punchOutTime: serverClock.iso,
-        punchOutLat: params.lat,
-        punchOutLng: params.lng,
-        punchOutAccuracy: Math.round(params.accuracy || 0),
+        punchOutLat: safeLat,
+        punchOutLng: safeLng,
+        punchOutAccuracy: safeAcc,
         punchOutPhotoId: photoId,
         workingMinutes,
         status: nextStatus,
@@ -1268,9 +1445,9 @@ export async function punchOut(params: {
         ...prev,
         id: params.recordId,
         punchOutTime: serverClock.iso,
-        punchOutLat: params.lat,
-        punchOutLng: params.lng,
-        punchOutAccuracy: Math.round(params.accuracy || 0),
+        punchOutLat: safeLat,
+        punchOutLng: safeLng,
+        punchOutAccuracy: safeAcc,
         punchOutPhotoId: photoId,
         workingMinutes,
         status: nextStatus,
@@ -1286,19 +1463,43 @@ export async function punchOut(params: {
   }
 }
 
-export async function fetchAttendanceRecords(employee: Employee, monthPrefix?: string): Promise<AttendanceRecord[]> {
+export async function fetchAttendanceRecords(
+  employee: Employee,
+  monthPrefix?: string,
+  canViewAll = true
+): Promise<AttendanceRecord[]> {
   try {
-    let q;
-    if (employee.role === 'super_admin' || employee.role === 'team_leader') {
-      q = query(collection(db, 'attendanceRecords'), orderBy('date', 'desc'), limit(500));
+    const byId = new Map<string, AttendanceRecord>();
+    if (
+      employee.role === 'super_admin' ||
+      (employee.role === 'team_leader' && canViewAll)
+    ) {
+      const snap = await getDocs(
+        query(collection(db, 'attendanceRecords'), orderBy('date', 'desc'), limit(500))
+      );
+      snap.docs.forEach((d) =>
+        byId.set(d.id, { id: d.id, ...(d.data() as Omit<AttendanceRecord, 'id'>) })
+      );
+    } else if (employee.role === 'team_leader') {
+      const [selfSnap, teamSnap] = await Promise.all([
+        getDocs(query(collection(db, 'attendanceRecords'), where('employeeUid', '==', employee.uid))),
+        getDocs(query(collection(db, 'attendanceRecords'), where('managerUid', '==', employee.uid))),
+      ]);
+      selfSnap.docs.forEach((d) =>
+        byId.set(d.id, { id: d.id, ...(d.data() as Omit<AttendanceRecord, 'id'>) })
+      );
+      teamSnap.docs.forEach((d) =>
+        byId.set(d.id, { id: d.id, ...(d.data() as Omit<AttendanceRecord, 'id'>) })
+      );
     } else {
-      q = query(
-        collection(db, 'attendanceRecords'),
-        where('employeeUid', '==', employee.uid)
+      const snap = await getDocs(
+        query(collection(db, 'attendanceRecords'), where('employeeUid', '==', employee.uid))
+      );
+      snap.docs.forEach((d) =>
+        byId.set(d.id, { id: d.id, ...(d.data() as Omit<AttendanceRecord, 'id'>) })
       );
     }
-    const snap = await getDocs(q);
-    let rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<AttendanceRecord, 'id'>) }));
+    let rows = Array.from(byId.values());
     if (monthPrefix) {
       rows = rows.filter((r) => r.date.startsWith(monthPrefix));
     }
@@ -1384,7 +1585,7 @@ export async function editAttendanceDirectly(params: {
   let workingMinutes = 0;
   if (punchInIso && punchOutIso) {
     const diff = (new Date(punchOutIso).getTime() - new Date(punchInIso).getTime()) / 60000;
-    workingMinutes = Math.max(0, Math.min(1440, Math.round(diff)));
+    workingMinutes = Number.isFinite(diff) ? Math.max(0, Math.min(1440, Math.round(diff))) : 0;
   }
 
   try {
@@ -1395,7 +1596,7 @@ export async function editAttendanceDirectly(params: {
       doc(db, 'attendanceRecords', recordId),
       cleanObject({
         employeeId: params.employee.id,
-        employeeUid: params.employee.uid || params.employee.id,
+        employeeUid: params.employee.uid || prev?.employeeUid || params.employee.id,
         employeeName: params.employee.fullName,
         department: params.employee.department,
         managerUid: params.employee.managerUid,
@@ -1685,12 +1886,27 @@ export async function reviewLeaveApplication(params: {
           ? await tx.get(revRef)
           : null;
 
+      const leaveDates =
+        params.decision === 'Approved' ? enumerateDates(current.startDate, current.endDate) : [];
+      const existingAttSnaps =
+        leaveDates.length > 0
+          ? await Promise.all(
+              leaveDates.map((dateStr) => {
+                const recId = `${current.employeeId}_${dateStr}`.replace(/[^a-zA-Z0-9_-]/g, '');
+                return tx.get(doc(db, 'attendanceRecords', recId));
+              })
+            )
+          : [];
+
       const leaveMonth =
         current.startDate && current.startDate.length >= 7
           ? current.startDate.slice(0, 7)
           : getTodayInTimezone(emp.timezone || 'Asia/Kolkata').slice(0, 7);
-      const leaveYear = Number(leaveMonth.slice(0, 4));
-      const empEmail = (emp.email || `${current.employeeId}@talentgrade.local`).toLowerCase();
+      const leaveYear = Number(leaveMonth.slice(0, 4)) || new Date().getUTCFullYear();
+      const empEmail = (emp.email || `${current.employeeId}@talentgrade.local`).trim().toLowerCase().slice(0, 120);
+      const empName = (current.employeeName || emp.fullName || 'Employee').trim().slice(0, 120);
+      const actorName = (params.actor.fullName || params.actor.email || 'Admin').trim().slice(0, 120);
+      const targetEmployeeUid = current.employeeUid || emp.uid || current.employeeId;
 
       if (params.decision === 'Approved') {
         if (current.status !== 'Pending') {
@@ -1702,10 +1918,10 @@ export async function reviewLeaveApplication(params: {
         if (!current.balanceDeducted && (current.leaveType === 'SL' || current.leaveType === 'CL')) {
           deductedAmount = current.days;
           balanceDeducted = true;
-          const nextBal =
-            current.leaveType === 'SL'
-              ? round2(emp.sickLeaveBalance - deductedAmount)
-              : round2(emp.casualLeaveBalance - deductedAmount);
+          const prevBal = round2(
+            current.leaveType === 'SL' ? emp.sickLeaveBalance : emp.casualLeaveBalance
+          );
+          const nextBal = round2(prevBal - deductedAmount);
 
           if (current.leaveType === 'SL') {
             tx.update(empRef, {
@@ -1720,24 +1936,28 @@ export async function reviewLeaveApplication(params: {
           }
 
           if (dedSnap && !dedSnap.exists()) {
-            tx.set(dedRef, {
-              employeeId: current.employeeId,
-              employeeUid: current.employeeUid || emp.uid || '',
-              employeeEmail: empEmail,
-              employeeName: current.employeeName,
-              leaveType: current.leaveType,
-              entryType: 'approved_deduction',
-              month: leaveMonth,
-              year: leaveYear,
-              amount: round2(-deductedAmount),
-              balanceAfter: nextBal,
-              source: 'leave_approval',
-              referenceId: params.leave.id,
-              reason: `Approved ${current.leaveType} leave (${current.startDate} to ${current.endDate}, ${deductedAmount}d)`,
-              createdBy: actorUid,
-              createdByName: params.actor.fullName,
-              createdAt: serverTimestamp(),
-            });
+            tx.set(
+              dedRef,
+              cleanObject({
+                employeeId: current.employeeId,
+                employeeUid: targetEmployeeUid,
+                employeeEmail: empEmail,
+                employeeName: empName,
+                leaveType: current.leaveType,
+                entryType: 'approved_deduction',
+                month: leaveMonth,
+                year: leaveYear,
+                amount: round2(-deductedAmount),
+                balanceBefore: prevBal,
+                balanceAfter: nextBal,
+                source: 'leave_approval',
+                referenceId: params.leave.id,
+                reason: `Approved ${current.leaveType} leave (${current.startDate} to ${current.endDate}, ${deductedAmount}d)`,
+                createdBy: actorUid,
+                createdByName: actorName,
+                createdAt: serverTimestamp(),
+              })
+            );
           }
         }
 
@@ -1746,22 +1966,23 @@ export async function reviewLeaveApplication(params: {
           balanceDeducted,
           deductedAmount,
           reviewedBy: params.actor.uid,
-          reviewedByName: params.actor.fullName,
+          reviewedByName: actorName,
           reviewComment: params.comment.trim().slice(0, 500),
           reviewedAt: serverTimestamp(),
         }));
 
-        const leaveDates = enumerateDates(current.startDate, current.endDate);
-        for (const dateStr of leaveDates) {
+        leaveDates.forEach((dateStr, idx) => {
           const recId = `${current.employeeId}_${dateStr}`.replace(/[^a-zA-Z0-9_-]/g, '');
           const recRef = doc(db, 'attendanceRecords', recId);
+          const existingSnap = existingAttSnaps[idx];
+          const existingCreatedAt = existingSnap?.exists() ? existingSnap.data()?.createdAt : undefined;
           tx.set(
             recRef,
             cleanObject({
               employeeId: current.employeeId,
-              employeeUid: current.employeeUid,
-              employeeName: current.employeeName,
-              department: current.department,
+              employeeUid: targetEmployeeUid,
+              employeeName: empName,
+              department: current.department || emp.department || 'Operations',
               managerUid: current.managerUid,
               date: dateStr,
               timezone: emp.timezone || 'Asia/Kolkata',
@@ -1770,11 +1991,11 @@ export async function reviewLeaveApplication(params: {
               isLate: false,
               lateByMinutes: 0,
               notes: `Approved ${current.leaveType} leave`,
-              createdAt: serverTimestamp(),
+              createdAt: existingCreatedAt || serverTimestamp(),
               updatedAt: serverTimestamp(),
             })
           );
-        }
+        });
       } else if (params.decision === 'Rejected') {
         if (current.status !== 'Pending') {
           throw new Error('Only pending applications can be rejected.');
@@ -1784,16 +2005,16 @@ export async function reviewLeaveApplication(params: {
           balanceDeducted: false,
           deductedAmount: 0,
           reviewedBy: params.actor.uid,
-          reviewedByName: params.actor.fullName,
+          reviewedByName: actorName,
           reviewComment: params.comment.trim().slice(0, 500),
           reviewedAt: serverTimestamp(),
         }));
       } else if (params.decision === 'Cancelled') {
         if (current.status === 'Approved' && current.balanceDeducted && current.deductedAmount > 0) {
-          const restoredBal =
-            current.leaveType === 'SL'
-              ? round2(emp.sickLeaveBalance + current.deductedAmount)
-              : round2(emp.casualLeaveBalance + current.deductedAmount);
+          const prevBal = round2(
+            current.leaveType === 'SL' ? emp.sickLeaveBalance : emp.casualLeaveBalance
+          );
+          const restoredBal = round2(prevBal + current.deductedAmount);
 
           if (current.leaveType === 'SL') {
             tx.update(empRef, {
@@ -1808,24 +2029,28 @@ export async function reviewLeaveApplication(params: {
           }
 
           if (revSnap && !revSnap.exists()) {
-            tx.set(revRef, {
-              employeeId: current.employeeId,
-              employeeUid: current.employeeUid || emp.uid || '',
-              employeeEmail: empEmail,
-              employeeName: current.employeeName,
-              leaveType: current.leaveType,
-              entryType: 'leave_reversal',
-              month: leaveMonth,
-              year: leaveYear,
-              amount: round2(current.deductedAmount),
-              balanceAfter: restoredBal,
-              source: 'leave_reversal',
-              referenceId: params.leave.id,
-              reason: `Reversed approved ${current.leaveType} leave (${current.startDate} to ${current.endDate}, +${current.deductedAmount}d restored)`,
-              createdBy: actorUid,
-              createdByName: params.actor.fullName,
-              createdAt: serverTimestamp(),
-            });
+            tx.set(
+              revRef,
+              cleanObject({
+                employeeId: current.employeeId,
+                employeeUid: targetEmployeeUid,
+                employeeEmail: empEmail,
+                employeeName: empName,
+                leaveType: current.leaveType,
+                entryType: 'leave_reversal',
+                month: leaveMonth,
+                year: leaveYear,
+                amount: round2(current.deductedAmount),
+                balanceBefore: prevBal,
+                balanceAfter: restoredBal,
+                source: 'leave_reversal',
+                referenceId: params.leave.id,
+                reason: `Reversed approved ${current.leaveType} leave (${current.startDate} to ${current.endDate}, +${current.deductedAmount}d restored)`,
+                createdBy: actorUid,
+                createdByName: actorName,
+                createdAt: serverTimestamp(),
+              })
+            );
           }
         }
         tx.update(leaveRef, cleanObject({
@@ -1887,14 +2112,40 @@ export async function saveEmployeeSalary(
   },
   actor: Employee
 ): Promise<EmployeeSalary> {
+  const basicSalary = Number(params.basicSalary);
+  const hra = Number(params.hra);
+  const professionalTax = Number(params.professionalTax);
+  const defaultBonus = Number(params.defaultBonus);
+  if (
+    !Number.isFinite(basicSalary) ||
+    !Number.isFinite(hra) ||
+    !Number.isFinite(professionalTax) ||
+    !Number.isFinite(defaultBonus) ||
+    basicSalary < 0 ||
+    hra < 0 ||
+    professionalTax < 0 ||
+    defaultBonus < 0
+  ) {
+    throw new Error('Salary fields must be valid non-negative numbers.');
+  }
+
+  const safeOtherEarnings = params.otherEarnings.slice(0, 15).map((item) => ({
+    label: String(item.label || '').trim().slice(0, 80),
+    amount: Number.isFinite(Number(item.amount)) && Number(item.amount) >= 0 ? Number(item.amount) : 0,
+  }));
+  const safeDeductions = params.deductions.slice(0, 15).map((item) => ({
+    label: String(item.label || '').trim().slice(0, 80),
+    amount: Number.isFinite(Number(item.amount)) && Number(item.amount) >= 0 ? Number(item.amount) : 0,
+  }));
+
   const gross =
-    params.basicSalary +
-    params.hra +
-    params.defaultBonus +
-    params.otherEarnings.reduce((sum, i) => sum + Number(i.amount || 0), 0);
+    basicSalary +
+    hra +
+    defaultBonus +
+    safeOtherEarnings.reduce((sum, i) => sum + i.amount, 0);
   const totalDed =
-    params.professionalTax +
-    params.deductions.reduce((sum, i) => sum + Number(i.amount || 0), 0);
+    professionalTax +
+    safeDeductions.reduce((sum, i) => sum + i.amount, 0);
   const netSalary = gross - totalDed;
   const currency = params.currency || params.employee.currency || 'INR';
 
@@ -1902,12 +2153,12 @@ export async function saveEmployeeSalary(
     employeeId: params.employee.id,
     employeeUid: params.employee.uid || '',
     currency,
-    basicSalary: Number(params.basicSalary),
-    hra: Number(params.hra),
-    otherEarnings: params.otherEarnings.slice(0, 15),
-    deductions: params.deductions.slice(0, 15),
-    professionalTax: Number(params.professionalTax),
-    defaultBonus: Number(params.defaultBonus),
+    basicSalary,
+    hra,
+    otherEarnings: safeOtherEarnings,
+    deductions: safeDeductions,
+    professionalTax,
+    defaultBonus,
     netSalary,
     updatedAt: serverTimestamp(),
     updatedBy: actor.uid,
@@ -1929,10 +2180,13 @@ export async function saveEmployeeSalary(
   }
 }
 
-export async function fetchPayrollRecords(employee: Employee): Promise<PayrollRecord[]> {
+export async function fetchPayrollRecords(
+  employee: Employee,
+  canViewSalary = false
+): Promise<PayrollRecord[]> {
   try {
     let q;
-    if (employee.role === 'super_admin') {
+    if (employee.role === 'super_admin' || (employee.role === 'team_leader' && canViewSalary)) {
       q = query(collection(db, 'payrollRecords'), orderBy('month', 'desc'));
     } else {
       q = query(
@@ -1969,14 +2223,53 @@ export async function savePayrollRecord(
   actor: Employee
 ): Promise<PayrollRecord> {
   const id = `${params.employee.id}_${params.month}`.replace(/[^a-zA-Z0-9_-]/g, '');
+  const basicSalary = Number(params.basicSalary);
+  const hra = Number(params.hra);
+  const bonus = Number(params.bonus);
+  const professionalTax = Number(params.professionalTax);
+  const workingDaysInMonth = Number(params.workingDaysInMonth);
+  const presentDays = Number(params.presentDays);
+  const leaveDays = Number(params.leaveDays);
+
+  if (
+    !Number.isFinite(basicSalary) ||
+    !Number.isFinite(hra) ||
+    !Number.isFinite(bonus) ||
+    !Number.isFinite(professionalTax) ||
+    !Number.isFinite(workingDaysInMonth) ||
+    !Number.isFinite(presentDays) ||
+    !Number.isFinite(leaveDays) ||
+    basicSalary < 0 ||
+    hra < 0 ||
+    bonus < 0 ||
+    professionalTax < 0 ||
+    workingDaysInMonth < 0 ||
+    workingDaysInMonth > 31 ||
+    presentDays < 0 ||
+    presentDays > 31 ||
+    leaveDays < 0 ||
+    leaveDays > 31
+  ) {
+    throw new Error('Payroll monetary and attendance day values must be valid finite numbers.');
+  }
+
+  const safeOtherEarnings = params.otherEarnings.slice(0, 15).map((item) => ({
+    label: String(item.label || '').trim().slice(0, 80),
+    amount: Number.isFinite(Number(item.amount)) && Number(item.amount) >= 0 ? Number(item.amount) : 0,
+  }));
+  const safeDeductions = params.deductions.slice(0, 15).map((item) => ({
+    label: String(item.label || '').trim().slice(0, 80),
+    amount: Number.isFinite(Number(item.amount)) && Number(item.amount) >= 0 ? Number(item.amount) : 0,
+  }));
+
   const grossEarnings =
-    Number(params.basicSalary) +
-    Number(params.hra) +
-    Number(params.bonus) +
-    params.otherEarnings.reduce((s, x) => s + Number(x.amount || 0), 0);
+    basicSalary +
+    hra +
+    bonus +
+    safeOtherEarnings.reduce((s, x) => s + x.amount, 0);
   const totalDeductions =
-    Number(params.professionalTax) +
-    params.deductions.reduce((s, x) => s + Number(x.amount || 0), 0);
+    professionalTax +
+    safeDeductions.reduce((s, x) => s + x.amount, 0);
   const netSalary = grossEarnings - totalDeductions;
   const currency = params.currency || params.employee.currency || 'INR';
 
@@ -1998,18 +2291,18 @@ export async function savePayrollRecord(
       location: params.employee.location || 'India',
       currency,
       month: params.month,
-      basicSalary: Number(params.basicSalary),
-      hra: Number(params.hra),
-      otherEarnings: params.otherEarnings.slice(0, 15),
-      bonus: Number(params.bonus),
-      deductions: params.deductions.slice(0, 15),
-      professionalTax: Number(params.professionalTax),
+      basicSalary,
+      hra,
+      otherEarnings: safeOtherEarnings,
+      bonus,
+      deductions: safeDeductions,
+      professionalTax,
       grossEarnings,
       totalDeductions,
       netSalary,
-      workingDaysInMonth: Number(params.workingDaysInMonth),
-      presentDays: Number(params.presentDays),
-      leaveDays: Number(params.leaveDays),
+      workingDaysInMonth,
+      presentDays,
+      leaveDays,
       status: params.status,
       notes: params.notes?.trim().slice(0, 500) || undefined,
       createdBy: prev?.createdBy || actor.uid,
@@ -2040,7 +2333,6 @@ export async function savePayrollRecord(
 export async function generatePayslipPdfBlob(payslip: PayrollRecord, settings: CompanySettings | null): Promise<Blob> {
   const user = auth.currentUser;
   if (!user) throw new Error('Not authenticated');
-  const token = await user.getIdToken();
 
   let logoDataUrl: string | undefined;
   if (settings?.logoAssetId) {
@@ -2048,41 +2340,72 @@ export async function generatePayslipPdfBlob(payslip: PayrollRecord, settings: C
     logoDataUrl = logoAsset?.dataUrl;
   }
 
-  const res = await fetch('/api/payslips/pdf', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({
-      payslip,
-      company: settings,
-      logoDataUrl,
-    }),
-  });
+  const sendRequest = async (forceRefresh: boolean) => {
+    const token = await user.getIdToken(forceRefresh);
+    return fetch('/api/payslips/pdf', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        payslip,
+        company: settings,
+        logoDataUrl,
+      }),
+    });
+  };
+
+  let res = await sendRequest(false);
+  if (res.status === 401) {
+    res = await sendRequest(true);
+  }
 
   if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(errText || 'Failed to generate payslip PDF');
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const errBody = await res.json().catch(() => null);
+      if (errBody && typeof errBody.error === 'string') {
+        throw new Error(errBody.error);
+      }
+    }
+    throw new Error(`Failed to generate payslip PDF (HTTP ${res.status})`);
   }
   return res.blob();
 }
 
 export async function fetchLeaveLedger(currentEmployee: Employee): Promise<LeaveLedgerEntry[]> {
   try {
+    const byId = new Map<string, LeaveLedgerEntry>();
     const email = (currentEmployee.email || '').trim().toLowerCase();
-    const q =
-      currentEmployee.role === 'super_admin' || currentEmployee.role === 'team_leader'
-        ? query(collection(db, 'leaveLedger'), orderBy('month', 'desc'), limit(500))
-        : query(collection(db, 'leaveLedger'), where('employeeEmail', '==', email));
-    const snap = await getDocs(q);
-    return snap.docs
-      .map((d) => ({ id: d.id, ...(d.data() as Omit<LeaveLedgerEntry, 'id'>) }))
-      .sort((a, b) => {
-        const cmp = b.month.localeCompare(a.month);
-        if (cmp !== 0) return cmp;
-        return a.id.localeCompare(b.id);
-      });
+
+    if (currentEmployee.role === 'super_admin' || currentEmployee.role === 'team_leader') {
+      const snap = await getDocs(
+        query(collection(db, 'leaveLedger'), orderBy('month', 'desc'), limit(500))
+      );
+      snap.docs.forEach((d) =>
+        byId.set(d.id, { id: d.id, ...(d.data() as Omit<LeaveLedgerEntry, 'id'>) })
+      );
+    } else {
+      const queries = [
+        query(collection(db, 'leaveLedger'), where('employeeUid', '==', currentEmployee.uid)),
+      ];
+      if (auth.currentUser?.emailVerified && email) {
+        queries.push(query(collection(db, 'leaveLedger'), where('employeeEmail', '==', email)));
+      }
+      const snaps = await Promise.all(queries.map((q) => getDocs(q)));
+      for (const snap of snaps) {
+        snap.docs.forEach((d) =>
+          byId.set(d.id, { id: d.id, ...(d.data() as Omit<LeaveLedgerEntry, 'id'>) })
+        );
+      }
+    }
+
+    return Array.from(byId.values()).sort((a, b) => {
+      const cmp = b.month.localeCompare(a.month);
+      if (cmp !== 0) return cmp;
+      return a.id.localeCompare(b.id);
+    });
   } catch (err) {
     handleFirestoreError(err, OperationType.LIST, 'leaveLedger');
   }
@@ -2102,25 +2425,40 @@ export async function computeLeaveAccrualsOnServer(params: {
 }> {
   const user = auth.currentUser;
   if (!user) throw new Error('Not authenticated');
-  const token = await user.getIdToken();
-  const res = await fetch('/api/leave/accrual/compute', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({
-      employees: params.employees,
-      policy: normalizeLeavePolicyConfig(params.policy),
-      existingLedger: params.existingLedger,
-      approvedLeaves: params.approvedLeaves.filter((l) => l.status === 'Approved'),
-      actor: { uid: user.uid, name: params.actor.fullName },
-      isNewEmployeeInit: Boolean(params.isNewEmployeeInit),
-    }),
-  });
+
+  const sendRequest = async (forceRefresh: boolean) => {
+    const token = await user.getIdToken(forceRefresh);
+    return fetch('/api/leave/accrual/compute', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        employees: params.employees,
+        policy: normalizeLeavePolicyConfig(params.policy),
+        existingLedger: params.existingLedger,
+        approvedLeaves: params.approvedLeaves.filter((l) => l.status === 'Approved'),
+        actor: { uid: user.uid, name: params.actor.fullName },
+        isNewEmployeeInit: Boolean(params.isNewEmployeeInit),
+      }),
+    });
+  };
+
+  let res = await sendRequest(false);
+  if (res.status === 401) {
+    res = await sendRequest(true);
+  }
+
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || 'Failed to compute leave accruals from server');
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const errBody = await res.json().catch(() => null);
+      if (errBody && typeof errBody.error === 'string') {
+        throw new Error(errBody.error);
+      }
+    }
+    throw new Error(`Failed to compute leave accruals from server (HTTP ${res.status})`);
   }
   return res.json();
 }
@@ -2157,7 +2495,9 @@ export async function runServerLeaveAccrualSync(params: {
     };
   }
 
-  const actorUid = auth.currentUser?.uid || params.actor.uid;
+  const actorUid = auth.currentUser?.uid || params.actor.uid || 'system';
+  const actorName = (params.actor.fullName || params.actor.email || 'Super Admin').trim().slice(0, 120);
+  const syncErrors: string[] = [];
 
   for (const plan of computed.plans) {
     if (!plan.hasChanges) continue;
@@ -2176,7 +2516,11 @@ export async function runServerLeaveAccrualSync(params: {
         const currentEmp = empSnap.data() as Employee;
         const needsEmpUpdate =
           missingEntries.length > 0 ||
+          round2(currentEmp.sickLeaveBalance) !== round2(plan.employeeUpdates.sickLeaveBalance) ||
+          round2(currentEmp.casualLeaveBalance) !== round2(plan.employeeUpdates.casualLeaveBalance) ||
+          round2(currentEmp.carryForwardBalance) !== round2(plan.employeeUpdates.carryForwardBalance) ||
           !currentEmp.leavePolicyMigrated ||
+          currentEmp.leaveBaselineMonth !== plan.employeeUpdates.leaveBaselineMonth ||
           currentEmp.leaveLastSyncedMonth !== plan.employeeUpdates.leaveLastSyncedMonth ||
           currentEmp.leaveLastResetYear !== plan.employeeUpdates.leaveLastResetYear ||
           currentEmp.clEligibilityDate !== plan.employeeUpdates.clEligibilityDate;
@@ -2188,12 +2532,28 @@ export async function runServerLeaveAccrualSync(params: {
         for (const entry of missingEntries) {
           const { id: entryDocId, ...entryFields } = entry;
           const ledgerRef = doc(db, 'leaveLedger', entryDocId);
-          tx.set(ledgerRef, {
-            ...cleanObject(entryFields as unknown as Record<string, unknown>),
-            createdBy: actorUid,
-            createdByName: params.actor.fullName,
-            createdAt: serverTimestamp(),
-          });
+          tx.set(
+            ledgerRef,
+            cleanObject({
+              ...entryFields,
+              employeeId: plan.employeeId,
+              employeeUid: entryFields.employeeUid || currentEmp.uid || '',
+              employeeEmail: (entryFields.employeeEmail || currentEmp.email || `${plan.employeeId}@talentgrade.local`)
+                .trim()
+                .toLowerCase()
+                .slice(0, 120),
+              employeeName: (entryFields.employeeName || currentEmp.fullName || 'Employee').trim().slice(0, 120),
+              amount: round2(entryFields.amount),
+              balanceBefore:
+                typeof entryFields.balanceBefore === 'number' ? round2(entryFields.balanceBefore) : undefined,
+              balanceAfter:
+                typeof entryFields.balanceAfter === 'number' ? round2(entryFields.balanceAfter) : undefined,
+              year: Number(entryFields.year) || new Date().getUTCFullYear(),
+              createdBy: actorUid,
+              createdByName: actorName,
+              createdAt: serverTimestamp(),
+            } as unknown as Record<string, unknown>)
+          );
         }
 
         if (needsEmpUpdate) {
@@ -2212,7 +2572,9 @@ export async function runServerLeaveAccrualSync(params: {
       committedEntriesCount += committed.entries;
       if (committed.updated) updatedEmployeesCount += 1;
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       console.error(`Accrual transaction failed for ${plan.employeeId}:`, err);
+      syncErrors.push(`${plan.employeeId}: ${msg}`);
     }
   }
 
@@ -2231,6 +2593,10 @@ export async function runServerLeaveAccrualSync(params: {
     });
   }
 
+  if (syncErrors.length > 0) {
+    throw new Error(`Leave accrual sync failed for ${syncErrors.length} employee(s): ${syncErrors[0]}`);
+  }
+
   return {
     serverTimeIso: computed.serverTimeIso,
     plans: computed.plans,
@@ -2243,6 +2609,7 @@ export async function adjustEmployeeLeaveBalance(params: {
   targetEmployee: Employee;
   leaveType: 'SL' | 'CL';
   delta: number;
+  targetBalance?: number;
   reason: string;
   actor: Employee;
   carryForwardDelta?: number;
@@ -2250,20 +2617,35 @@ export async function adjustEmployeeLeaveBalance(params: {
   if (!params.reason.trim()) {
     throw new Error('A reason is required for manual leave adjustments.');
   }
-  if (params.delta === 0 && !params.carryForwardDelta) {
+  const hasTarget = typeof params.targetBalance === 'number' && Number.isFinite(params.targetBalance);
+  const inputDelta = Number(params.delta);
+  if (!hasTarget && !Number.isFinite(inputDelta)) {
+    throw new Error('Adjustment amount must be a valid number.');
+  }
+  const cfDelta =
+    typeof params.carryForwardDelta === 'number' && Number.isFinite(params.carryForwardDelta)
+      ? round2(params.carryForwardDelta)
+      : 0;
+
+  if (!hasTarget && round2(inputDelta) === 0 && cfDelta === 0) {
     throw new Error('Adjustment amount cannot be zero.');
   }
 
-  const actorUid = auth.currentUser?.uid || params.actor.uid;
+  const actorUid = auth.currentUser?.uid || params.actor.uid || 'system';
+  const actorName = (params.actor.fullName || params.actor.email || 'Super Admin').trim().slice(0, 120);
   const todayLocal = getTodayInTimezone(params.targetEmployee.timezone || 'Asia/Kolkata');
   const currentMonth = todayLocal.slice(0, 7);
-  const currentYear = Number(todayLocal.slice(0, 4));
-  const empEmail = (params.targetEmployee.email || `${params.targetEmployee.id}@talentgrade.local`).toLowerCase();
+  const currentYear = Number(todayLocal.slice(0, 4)) || new Date().getUTCFullYear();
+  const empEmail = (params.targetEmployee.email || `${params.targetEmployee.id}@talentgrade.local`)
+    .trim()
+    .toLowerCase()
+    .slice(0, 120);
   const ledgerId = makeSafeId('adj');
 
   try {
     let previousVal = 0;
     let nextVal = 0;
+    let appliedDelta = 0;
 
     await runTransaction(db, async (tx) => {
       const empRef = doc(db, 'employees', params.targetEmployee.id);
@@ -2271,12 +2653,25 @@ export async function adjustEmployeeLeaveBalance(params: {
       if (!empSnap.exists()) throw new Error('Employee record not found');
       const emp = empSnap.data() as Employee;
 
-      previousVal = params.leaveType === 'SL' ? emp.sickLeaveBalance : emp.casualLeaveBalance;
-      nextVal = round2(previousVal + Number(params.delta));
+      previousVal = round2(
+        params.leaveType === 'SL' ? emp.sickLeaveBalance : emp.casualLeaveBalance
+      );
+      nextVal = hasTarget
+        ? round2(params.targetBalance!)
+        : round2(previousVal + inputDelta);
+      appliedDelta = round2(nextVal - previousVal);
+
+      if (appliedDelta === 0 && cfDelta === 0) {
+        throw new Error('New balance equals the current balance; no change required.');
+      }
+      if (nextVal < -60 || nextVal > 365) {
+        throw new Error('Resulting leave balance must be between -60 and 365 days.');
+      }
+
       const nextCf =
-        typeof params.carryForwardDelta === 'number'
-          ? Math.max(0, round2(emp.carryForwardBalance + params.carryForwardDelta))
-          : emp.carryForwardBalance;
+        cfDelta !== 0
+          ? Math.max(0, round2(Number(emp.carryForwardBalance ?? 0) + cfDelta))
+          : Math.max(0, round2(Number(emp.carryForwardBalance ?? 0)));
 
       if (params.leaveType === 'SL') {
         tx.update(empRef, {
@@ -2292,24 +2687,29 @@ export async function adjustEmployeeLeaveBalance(params: {
         });
       }
 
-      if (params.delta !== 0) {
-        tx.set(doc(db, 'leaveLedger', ledgerId), {
-          employeeId: params.targetEmployee.id,
-          employeeUid: emp.uid || '',
-          employeeEmail: empEmail,
-          employeeName: emp.fullName,
-          leaveType: params.leaveType,
-          entryType: 'admin_adjustment',
-          month: currentMonth,
-          year: currentYear,
-          amount: round2(params.delta),
-          balanceAfter: nextVal,
-          source: 'admin_manual',
-          reason: params.reason.trim().slice(0, 500),
-          createdBy: actorUid,
-          createdByName: params.actor.fullName,
-          createdAt: serverTimestamp(),
-        });
+      if (appliedDelta !== 0) {
+        const empName = (emp.fullName || params.targetEmployee.fullName || 'Employee').trim().slice(0, 120);
+        tx.set(
+          doc(db, 'leaveLedger', ledgerId),
+          cleanObject({
+            employeeId: snapIdOrFallback(empSnap.id, params.targetEmployee.id),
+            employeeUid: emp.uid || '',
+            employeeEmail: (emp.email || empEmail).trim().toLowerCase().slice(0, 120),
+            employeeName: empName,
+            leaveType: params.leaveType,
+            entryType: 'admin_adjustment',
+            month: currentMonth,
+            year: currentYear,
+            amount: appliedDelta,
+            balanceBefore: previousVal,
+            balanceAfter: nextVal,
+            source: 'admin_manual',
+            reason: params.reason.trim().slice(0, 500),
+            createdBy: actorUid,
+            createdByName: actorName,
+            createdAt: serverTimestamp(),
+          })
+        );
       }
     });
 
@@ -2319,12 +2719,22 @@ export async function adjustEmployeeLeaveBalance(params: {
       entityType: 'Employee',
       entityId: params.targetEmployee.id,
       previousValues: { [params.leaveType]: previousVal },
-      updatedValues: { [params.leaveType]: nextVal, delta: params.delta, reason: params.reason.trim() },
-      summary: `Adjusted ${params.leaveType} balance for ${params.targetEmployee.fullName} by ${params.delta > 0 ? `+${params.delta}` : params.delta} (${previousVal} -> ${nextVal}). Reason: ${params.reason.trim()}`,
+      updatedValues: { [params.leaveType]: nextVal, delta: appliedDelta, reason: params.reason.trim() },
+      summary: `Adjusted ${params.leaveType} balance for ${params.targetEmployee.fullName} by ${appliedDelta > 0 ? `+${appliedDelta}` : appliedDelta} (${previousVal} -> ${nextVal}). Reason: ${params.reason.trim()}`,
     });
   } catch (err) {
+    if (
+      err instanceof Error &&
+      (err.message.includes('no change') || err.message.includes('between -60'))
+    ) {
+      throw err;
+    }
     handleFirestoreError(err, OperationType.UPDATE, `employees/${params.targetEmployee.id}`);
   }
+}
+
+function snapIdOrFallback(snapId: string | undefined, fallbackId: string): string {
+  return (snapId && snapId.trim()) || fallbackId;
 }
 
 export async function resolveMigrationVariance(params: {
@@ -2336,7 +2746,8 @@ export async function resolveMigrationVariance(params: {
   actor: Employee;
 }): Promise<void> {
   const empRef = doc(db, 'employees', params.targetEmployee.id);
-  const actorUid = auth.currentUser?.uid || params.actor.uid;
+  const actorUid = auth.currentUser?.uid || params.actor.uid || 'system';
+  const actorName = (params.actor.fullName || params.actor.email || 'Super Admin').trim().slice(0, 120);
 
   try {
     if (params.action === 'dismiss') {
@@ -2364,16 +2775,24 @@ export async function resolveMigrationVariance(params: {
     const summary: EmployeeLeaveComputedSummary | undefined = computed.plans[0]?.summary;
     if (!summary) return;
 
-    const targetSl = round2(summary.policyExpectedSlToDate - summary.slUsedThisYear);
-    const targetCl = round2(summary.policyExpectedClToDate - summary.clUsedTotal);
+    const targetSl = round2(Math.max(0, summary.policyExpectedSlToDate - summary.slUsedThisYear));
+    const targetCl = round2(Math.max(0, summary.policyExpectedClToDate - summary.clUsedTotal));
 
     await runTransaction(db, async (tx) => {
       const snap = await tx.get(empRef);
       if (!snap.exists()) throw new Error('Employee not found');
       const emp = snap.data() as Employee;
-      const slDelta = round2(targetSl - emp.sickLeaveBalance);
-      const clDelta = round2(targetCl - emp.casualLeaveBalance);
-      const empEmail = (emp.email || `${emp.id}@talentgrade.local`).toLowerCase();
+      const empId = snapIdOrFallback(snap.id, params.targetEmployee.id);
+      const prevSl = round2(Number(emp.sickLeaveBalance ?? 0));
+      const prevCl = round2(Number(emp.casualLeaveBalance ?? 0));
+      const slDelta = round2(targetSl - prevSl);
+      const clDelta = round2(targetCl - prevCl);
+      const empEmail = (emp.email || params.targetEmployee.email || `${empId}@talentgrade.local`)
+        .trim()
+        .toLowerCase()
+        .slice(0, 120);
+      const empName = (emp.fullName || params.targetEmployee.fullName || 'Employee').trim().slice(0, 120);
+      const syncYear = Number(summary.currentYear) || new Date().getUTCFullYear();
 
       tx.update(empRef, {
         sickLeaveBalance: targetSl,
@@ -2383,42 +2802,50 @@ export async function resolveMigrationVariance(params: {
       });
 
       if (slDelta !== 0) {
-        tx.set(doc(db, 'leaveLedger', makeSafeId('adj_mig_sl')), {
-          employeeId: emp.id,
-          employeeUid: emp.uid || '',
-          employeeEmail: empEmail,
-          employeeName: emp.fullName,
-          leaveType: 'SL',
-          entryType: 'admin_adjustment',
-          month: summary.currentMonth,
-          year: summary.currentYear,
-          amount: slDelta,
-          balanceAfter: targetSl,
-          source: 'admin_manual',
-          reason: `Aligned legacy Sick Leave balance to TalentGrade policy (${emp.sickLeaveBalance} -> ${targetSl})`,
-          createdBy: actorUid,
-          createdByName: params.actor.fullName,
-          createdAt: serverTimestamp(),
-        });
+        tx.set(
+          doc(db, 'leaveLedger', makeSafeId('adj_mig_sl')),
+          cleanObject({
+            employeeId: empId,
+            employeeUid: emp.uid || '',
+            employeeEmail: empEmail,
+            employeeName: empName,
+            leaveType: 'SL',
+            entryType: 'admin_adjustment',
+            month: summary.currentMonth,
+            year: syncYear,
+            amount: slDelta,
+            balanceBefore: prevSl,
+            balanceAfter: targetSl,
+            source: 'admin_manual',
+            reason: `Aligned legacy Sick Leave balance to TalentGrade policy (${prevSl} -> ${targetSl})`,
+            createdBy: actorUid,
+            createdByName: actorName,
+            createdAt: serverTimestamp(),
+          })
+        );
       }
       if (clDelta !== 0) {
-        tx.set(doc(db, 'leaveLedger', makeSafeId('adj_mig_cl')), {
-          employeeId: emp.id,
-          employeeUid: emp.uid || '',
-          employeeEmail: empEmail,
-          employeeName: emp.fullName,
-          leaveType: 'CL',
-          entryType: 'admin_adjustment',
-          month: summary.currentMonth,
-          year: summary.currentYear,
-          amount: clDelta,
-          balanceAfter: targetCl,
-          source: 'admin_manual',
-          reason: `Aligned legacy Casual Leave balance to TalentGrade policy (${emp.casualLeaveBalance} -> ${targetCl})`,
-          createdBy: actorUid,
-          createdByName: params.actor.fullName,
-          createdAt: serverTimestamp(),
-        });
+        tx.set(
+          doc(db, 'leaveLedger', makeSafeId('adj_mig_cl')),
+          cleanObject({
+            employeeId: empId,
+            employeeUid: emp.uid || '',
+            employeeEmail: empEmail,
+            employeeName: empName,
+            leaveType: 'CL',
+            entryType: 'admin_adjustment',
+            month: summary.currentMonth,
+            year: syncYear,
+            amount: clDelta,
+            balanceBefore: prevCl,
+            balanceAfter: targetCl,
+            source: 'admin_manual',
+            reason: `Aligned legacy Casual Leave balance to TalentGrade policy (${prevCl} -> ${targetCl})`,
+            createdBy: actorUid,
+            createdByName: actorName,
+            createdAt: serverTimestamp(),
+          })
+        );
       }
     });
 

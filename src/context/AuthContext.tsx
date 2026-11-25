@@ -136,7 +136,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const completeFirstLoginPasswordChange = async (newPassword: string) => {
     if (!firebaseUser || !employee) throw new Error('No active session');
-    await updatePassword(firebaseUser, newPassword);
+    try {
+      await updatePassword(firebaseUser, newPassword);
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code || '';
+      if (code === 'auth/requires-recent-login') {
+        throw new Error('For your security, please click Sign Out, log back in with your temporary password, and set your new password immediately.');
+      }
+      if (code === 'auth/weak-password') {
+        throw new Error('Please choose a stronger password with at least 8 characters.');
+      }
+      throw err;
+    }
     await updateEmployeeProfile(employee.id, { mustChangePassword: false }, employee);
     setEmployee((prev) => (prev ? { ...prev, mustChangePassword: false } : prev));
   };

@@ -2,12 +2,14 @@ export type LeaveType = 'SL' | 'CL' | 'LWP';
 
 export type LeaveLedgerEntryType =
   | 'monthly_accrual'
+  | 'monthly_expiry'
   | 'year_reset'
   | 'carry_forward'
   | 'approved_deduction'
   | 'leave_reversal'
   | 'admin_adjustment'
-  | 'migration_baseline';
+  | 'migration_baseline'
+  | 'opening_balance';
 
 export type LeaveLedgerSource =
   | 'accrual_engine'
@@ -50,6 +52,7 @@ export interface LeaveLedgerEntry {
   month: string; // YYYY-MM
   year: number;
   amount: number;
+  balanceBefore?: number;
   balanceAfter?: number;
   source: LeaveLedgerSource;
   referenceId?: string;
@@ -71,9 +74,11 @@ export interface EngineEmployeeInput {
   casualLeaveBalance: number;
   carryForwardBalance: number;
   leavePolicyMigrated?: boolean;
+  leaveBaselineMonth?: string; // YYYY-MM (months <= baselineMonth are covered by opening/migration baseline)
   leaveLastSyncedMonth?: string;
   leaveLastResetYear?: number;
   clEligibilityDate?: string;
+  clEligibilityCustom?: boolean;
   leaveMigrationNote?: string;
 }
 
@@ -100,6 +105,7 @@ export interface EmployeeLeaveComputedSummary {
   migrationBaselineSl: number;
   migrationBaselineCl: number;
   slAccruedThisYear: number;
+  slExpiredThisYear: number;
   clAccruedThisYear: number;
   clAccruedTotal: number;
   slAdjustedThisYear: number;
@@ -122,9 +128,11 @@ export interface EmployeeAccrualPlan {
     casualLeaveBalance: number;
     carryForwardBalance: number;
     leavePolicyMigrated: boolean;
+    leaveBaselineMonth?: string;
     leaveLastSyncedMonth: string;
     leaveLastResetYear: number;
     clEligibilityDate: string;
+    clEligibilityCustom?: boolean;
     leaveMigrationNote?: string;
   };
   hasChanges: boolean;
@@ -132,13 +140,33 @@ export interface EmployeeAccrualPlan {
 }
 
 export function round2(n: number): number {
-  return Math.round((Number(n) || 0) * 100) / 100;
+  const num = Number(n);
+  if (!Number.isFinite(num)) return 0;
+  return Math.round(num * 100) / 100;
+}
+
+export function isValidIsoDate(val?: string | null): val is string {
+  if (typeof val !== 'string') return false;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(val.trim());
+  if (!m) return false;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (y < 1970 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31) return false;
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+}
+
+export function isValidYearMonth(val?: string | null): val is string {
+  return typeof val === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(val.trim());
 }
 
 export function normalizeLeavePolicyConfig(raw?: Partial<LeavePolicyConfig> | null): LeavePolicyConfig {
   return {
     sickLeaveMonthlyRate:
-      typeof raw?.sickLeaveMonthlyRate === 'number' && raw.sickLeaveMonthlyRate >= 0
+      typeof raw?.sickLeaveMonthlyRate === 'number' &&
+      Number.isFinite(raw.sickLeaveMonthlyRate) &&
+      raw.sickLeaveMonthlyRate >= 0
         ? raw.sickLeaveMonthlyRate
         : DEFAULT_LEAVE_POLICY.sickLeaveMonthlyRate,
     sickLeaveCarryForward:
@@ -150,11 +178,15 @@ export function normalizeLeavePolicyConfig(raw?: Partial<LeavePolicyConfig> | nu
         ? raw.sickLeaveAnnualReset
         : DEFAULT_LEAVE_POLICY.sickLeaveAnnualReset,
     casualLeaveMonthlyRate:
-      typeof raw?.casualLeaveMonthlyRate === 'number' && raw.casualLeaveMonthlyRate >= 0
+      typeof raw?.casualLeaveMonthlyRate === 'number' &&
+      Number.isFinite(raw.casualLeaveMonthlyRate) &&
+      raw.casualLeaveMonthlyRate >= 0
         ? raw.casualLeaveMonthlyRate
         : DEFAULT_LEAVE_POLICY.casualLeaveMonthlyRate,
     casualLeaveEligibilityMonths:
-      typeof raw?.casualLeaveEligibilityMonths === 'number' && raw.casualLeaveEligibilityMonths >= 0
+      typeof raw?.casualLeaveEligibilityMonths === 'number' &&
+      Number.isFinite(raw.casualLeaveEligibilityMonths) &&
+      raw.casualLeaveEligibilityMonths >= 0
         ? Math.floor(raw.casualLeaveEligibilityMonths)
         : DEFAULT_LEAVE_POLICY.casualLeaveEligibilityMonths,
     casualLeaveCarryForward:
@@ -162,11 +194,15 @@ export function normalizeLeavePolicyConfig(raw?: Partial<LeavePolicyConfig> | nu
         ? raw.casualLeaveCarryForward
         : DEFAULT_LEAVE_POLICY.casualLeaveCarryForward,
     casualLeaveMaxCarryForward:
-      typeof raw?.casualLeaveMaxCarryForward === 'number' && raw.casualLeaveMaxCarryForward >= 0
+      typeof raw?.casualLeaveMaxCarryForward === 'number' &&
+      Number.isFinite(raw.casualLeaveMaxCarryForward) &&
+      raw.casualLeaveMaxCarryForward >= 0
         ? raw.casualLeaveMaxCarryForward
         : 0,
     casualLeaveExpiryMonths:
-      typeof raw?.casualLeaveExpiryMonths === 'number' && raw.casualLeaveExpiryMonths >= 0
+      typeof raw?.casualLeaveExpiryMonths === 'number' &&
+      Number.isFinite(raw.casualLeaveExpiryMonths) &&
+      raw.casualLeaveExpiryMonths >= 0
         ? Math.floor(raw.casualLeaveExpiryMonths)
         : 0,
   };
@@ -238,6 +274,18 @@ export function enumerateYearMonths(startYM: string, endYM: string): string[] {
   return out;
 }
 
+function getPreviousYearMonth(ym: string): string {
+  const match = /^(\d{4})-(\d{2})$/.exec(ym);
+  if (!match) return ym;
+  let y = Number(match[1]);
+  let m = Number(match[2]) - 1;
+  if (m < 1) {
+    m = 12;
+    y -= 1;
+  }
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}`;
+}
+
 function monthDiff(olderYM: string, newerYM: string): number {
   const oMatch = /^(\d{4})-(\d{2})$/.exec(olderYM);
   const nMatch = /^(\d{4})-(\d{2})$/.exec(newerYM);
@@ -259,19 +307,30 @@ export function computeEmployeeLeaveAccrualPlan(params: {
   actorName: string;
   isNewEmployeeInit?: boolean;
 }): EmployeeAccrualPlan {
-  const { employee, policy, referenceNow, actorUid, actorName, isNewEmployeeInit } = params;
+  const { employee, policy, referenceNow, isNewEmployeeInit } = params;
+  const actorUid = String(params.actorUid || 'system').trim() || 'system';
+  const actorName = (String(params.actorName || '').trim() || 'System Engine').slice(0, 120);
+  const empEmail = (String(employee.email || '').trim() || `${employee.id}@talentgrade.local`)
+    .toLowerCase()
+    .slice(0, 120);
+  const empName = (String(employee.fullName || '').trim() || 'Employee').slice(0, 120);
+
   const tz = employee.timezone || 'Asia/Kolkata';
   const todayLocal = getLocalTodayInTimezone(referenceNow, tz);
   const currentYear = Number(todayLocal.slice(0, 4));
   const currentMonth = todayLocal.slice(0, 7);
-  const joiningDate = employee.joiningDate || todayLocal;
+  const joiningDate = isValidIsoDate(employee.joiningDate) ? employee.joiningDate.trim() : todayLocal;
   const joiningMonth = joiningDate.slice(0, 7);
   const joiningYear = Number(joiningDate.slice(0, 4));
 
-  const clEligibilityDate = calculateCasualLeaveEligibilityDate(
+  const defaultClEligibilityDate = calculateCasualLeaveEligibilityDate(
     joiningDate,
     policy.casualLeaveEligibilityMonths
   );
+  const clEligibilityDate =
+    employee.clEligibilityCustom && isValidIsoDate(employee.clEligibilityDate)
+      ? employee.clEligibilityDate.trim()
+      : defaultClEligibilityDate;
   const clEligibilityMonth = clEligibilityDate.slice(0, 7);
   const isClEligible = todayLocal >= clEligibilityDate;
 
@@ -280,13 +339,17 @@ export function computeEmployeeLeaveAccrualPlan(params: {
     (l) => l.employeeId === employee.id && l.status === 'Approved'
   );
 
-  // Compute policy-expected totals to date (used for new hires and migration visibility)
+  // Policy-expected current entitlement to date (used for onboarding defaults & legacy variance display)
   const slThisYearStart = joiningMonth > `${currentYear}-01` ? joiningMonth : `${currentYear}-01`;
   const expectedSlMonths =
     joiningDate <= todayLocal && slThisYearStart <= currentMonth
       ? enumerateYearMonths(slThisYearStart, currentMonth)
       : [];
-  const policyExpectedSlToDate = round2(expectedSlMonths.length * policy.sickLeaveMonthlyRate);
+  const policyExpectedSlToDate = !policy.sickLeaveCarryForward
+    ? expectedSlMonths.includes(currentMonth)
+      ? round2(policy.sickLeaveMonthlyRate)
+      : 0
+    : round2(expectedSlMonths.length * policy.sickLeaveMonthlyRate);
 
   const expectedClMonths =
     isClEligible && clEligibilityMonth <= currentMonth
@@ -298,12 +361,12 @@ export function computeEmployeeLeaveAccrualPlan(params: {
 
   const slUsedThisYear = round2(
     empApproved
-      .filter((l) => l.leaveType === 'SL' && Number(l.startDate.slice(0, 4)) === currentYear)
+      .filter((l) => l.leaveType === 'SL' && Number(String(l.startDate || '').slice(0, 4)) === currentYear)
       .reduce((s, l) => s + Number(l.days || 0), 0)
   );
   const clUsedThisYear = round2(
     empApproved
-      .filter((l) => l.leaveType === 'CL' && Number(l.startDate.slice(0, 4)) === currentYear)
+      .filter((l) => l.leaveType === 'CL' && Number(String(l.startDate || '').slice(0, 4)) === currentYear)
       .reduce((s, l) => s + Number(l.days || 0), 0)
   );
   const clUsedTotal = round2(
@@ -313,62 +376,81 @@ export function computeEmployeeLeaveAccrualPlan(params: {
   );
   const lwpUsedThisYear = round2(
     empApproved
-      .filter((l) => l.leaveType === 'LWP' && Number(l.startDate.slice(0, 4)) === currentYear)
+      .filter((l) => l.leaveType === 'LWP' && Number(String(l.startDate || '').slice(0, 4)) === currentYear)
       .reduce((s, l) => s + Number(l.days || 0), 0)
   );
 
   const newEntries: Omit<LeaveLedgerEntry, 'createdAt'>[] = [];
 
-  // SAFE LEGACY MIGRATION:
-  // If an existing employee existed before leave policy migration and has no ledger entries yet,
-  // preserve their current SL/CL/CF balances in migration_baseline entries without silently altering them!
-  if (!employee.leavePolicyMigrated && empLedger.length === 0 && !isNewEmployeeInit) {
+  // SAFE LEGACY / BASELINE PRESERVATION:
+  // If an employee has NO ledger entries yet (pre-migration legacy employee, or an employee whose
+  // opening ledger wasn't written), preserve their stored SL/CL/CF balances in baseline entries
+  // without silently overwriting or wiping them!
+  if (empLedger.length === 0 && !isNewEmployeeInit) {
     const preservedSl = round2(employee.sickLeaveBalance);
     const preservedCl = round2(employee.casualLeaveBalance);
     const preservedCf = round2(employee.carryForwardBalance);
 
-    const migSlId = `mig_${employee.id}_SL`.replace(/[^a-zA-Z0-9_-]/g, '');
-    const migClId = `mig_${employee.id}_CL`.replace(/[^a-zA-Z0-9_-]/g, '');
+    const isLegacyUnmigrated = !employee.leavePolicyMigrated;
+    const slEntryId = (
+      isLegacyUnmigrated ? `mig_${employee.id}_SL` : `init_${employee.id}_SL`
+    ).replace(/[^a-zA-Z0-9_-]/g, '');
+    const clEntryId = (
+      isLegacyUnmigrated ? `mig_${employee.id}_CL` : `init_${employee.id}_CL`
+    ).replace(/[^a-zA-Z0-9_-]/g, '');
+
+    const baselineMonth = isValidYearMonth(employee.leaveBaselineMonth)
+      ? employee.leaveBaselineMonth.trim()
+      : isValidYearMonth(employee.leaveLastSyncedMonth)
+      ? employee.leaveLastSyncedMonth.trim()
+      : currentMonth;
+    const baselineYear = Number(baselineMonth.slice(0, 4)) || currentYear;
 
     newEntries.push({
-      id: migSlId,
+      id: slEntryId,
       employeeId: employee.id,
       employeeUid: employee.uid || '',
-      employeeEmail: (employee.email || '').toLowerCase(),
-      employeeName: employee.fullName,
+      employeeEmail: empEmail,
+      employeeName: empName,
       leaveType: 'SL',
-      entryType: 'migration_baseline',
-      month: currentMonth,
-      year: currentYear,
+      entryType: isLegacyUnmigrated ? 'migration_baseline' : 'opening_balance',
+      month: baselineMonth,
+      year: baselineYear,
       amount: preservedSl,
+      balanceBefore: 0,
       balanceAfter: preservedSl,
-      source: 'legacy_migration',
-      reason: `Preserved existing Sick Leave balance (${preservedSl}d) on policy migration`,
+      source: isLegacyUnmigrated ? 'legacy_migration' : 'admin_manual',
+      reason: isLegacyUnmigrated
+        ? `Preserved existing Sick Leave balance (${preservedSl}d) on policy migration`
+        : `Preserved configured opening Sick Leave balance (${preservedSl}d)`,
       createdBy: actorUid,
       createdByName: actorName,
     });
 
     newEntries.push({
-      id: migClId,
+      id: clEntryId,
       employeeId: employee.id,
       employeeUid: employee.uid || '',
-      employeeEmail: (employee.email || '').toLowerCase(),
-      employeeName: employee.fullName,
+      employeeEmail: empEmail,
+      employeeName: empName,
       leaveType: 'CL',
-      entryType: 'migration_baseline',
-      month: currentMonth,
-      year: currentYear,
+      entryType: isLegacyUnmigrated ? 'migration_baseline' : 'opening_balance',
+      month: baselineMonth,
+      year: baselineYear,
       amount: preservedCl,
+      balanceBefore: 0,
       balanceAfter: preservedCl,
-      source: 'legacy_migration',
-      reason: `Preserved existing Casual Leave balance (${preservedCl}d) on policy migration`,
+      source: isLegacyUnmigrated ? 'legacy_migration' : 'admin_manual',
+      reason: isLegacyUnmigrated
+        ? `Preserved existing Casual Leave balance (${preservedCl}d) on policy migration`
+        : `Preserved configured opening Casual Leave balance (${preservedCl}d)`,
       createdBy: actorUid,
       createdByName: actorName,
     });
 
-    const expectedSlNet = round2(policyExpectedSlToDate - slUsedThisYear);
-    const expectedClNet = round2(policyExpectedClToDate - clUsedTotal);
-    const hasVariance = preservedSl !== expectedSlNet || preservedCl !== expectedClNet;
+    const expectedSlNet = round2(Math.max(0, policyExpectedSlToDate - slUsedThisYear));
+    const expectedClNet = round2(Math.max(0, policyExpectedClToDate - clUsedTotal));
+    const hasVariance = isLegacyUnmigrated && (preservedSl !== expectedSlNet || preservedCl !== expectedClNet);
     const leaveMigrationNote = hasVariance
       ? `Legacy balance (${preservedSl} SL / ${preservedCl} CL) preserved; TalentGrade policy to date is ${expectedSlNet} SL / ${expectedClNet} CL.`
       : undefined;
@@ -381,9 +463,11 @@ export function computeEmployeeLeaveAccrualPlan(params: {
         casualLeaveBalance: preservedCl,
         carryForwardBalance: preservedCf,
         leavePolicyMigrated: true,
+        leaveBaselineMonth: baselineMonth,
         leaveLastSyncedMonth: currentMonth,
         leaveLastResetYear: currentYear,
         clEligibilityDate,
+        ...(employee.clEligibilityCustom ? { clEligibilityCustom: true } : {}),
         ...(leaveMigrationNote ? { leaveMigrationNote } : {}),
       },
       hasChanges: true,
@@ -397,9 +481,10 @@ export function computeEmployeeLeaveAccrualPlan(params: {
         sickLeaveBalance: preservedSl,
         casualLeaveBalance: preservedCl,
         carryForwardBalance: preservedCf,
-        migrationBaselineSl: preservedSl,
-        migrationBaselineCl: preservedCl,
+        migrationBaselineSl: isLegacyUnmigrated ? preservedSl : 0,
+        migrationBaselineCl: isLegacyUnmigrated ? preservedCl : 0,
         slAccruedThisYear: 0,
+        slExpiredThisYear: 0,
         clAccruedThisYear: 0,
         clAccruedTotal: 0,
         slAdjustedThisYear: 0,
@@ -420,11 +505,15 @@ export function computeEmployeeLeaveAccrualPlan(params: {
   const workingLedger: LeaveLedgerEntry[] = [...empLedger];
   const existingIds = new Set(workingLedger.map((e) => e.id));
 
-  const migrationEntry = workingLedger.find((e) => e.entryType === 'migration_baseline');
-  const migrationMonth = migrationEntry?.month;
-  const migrationYear = migrationEntry?.year;
+  const baselineEntry = workingLedger.find(
+    (e) => e.entryType === 'migration_baseline' || e.entryType === 'opening_balance'
+  );
+  const effectiveBaselineMonth = isValidYearMonth(employee.leaveBaselineMonth)
+    ? employee.leaveBaselineMonth.trim()
+    : baselineEntry?.month;
+  const baselineYear = effectiveBaselineMonth ? Number(effectiveBaselineMonth.slice(0, 4)) : undefined;
 
-  const startYear = Math.min(currentYear, migrationYear ?? joiningYear);
+  const startYear = Math.min(currentYear, baselineYear ?? joiningYear);
   let carryForwardBalance = round2(employee.carryForwardBalance);
 
   const sumBalanceFor = (leaveType: 'SL' | 'CL', beforeYear?: number): number => {
@@ -435,6 +524,35 @@ export function computeEmployeeLeaveAccrualPlan(params: {
     );
   };
 
+  const sumBalanceBeforeMonth = (leaveType: 'SL' | 'CL', beforeMonth: string): number => {
+    return round2(
+      workingLedger
+        .filter((e) => e.leaveType === leaveType && e.month < beforeMonth)
+        .reduce((s, e) => s + Number(e.amount || 0), 0)
+    );
+  };
+
+  const sumMonthlyAccrualInMonth = (leaveType: 'SL' | 'CL', ym: string): number => {
+    return round2(
+      workingLedger
+        .filter((e) => e.leaveType === leaveType && e.entryType === 'monthly_accrual' && e.month === ym)
+        .reduce((s, e) => s + Number(e.amount || 0), 0)
+    );
+  };
+
+  const sumNetUsedInMonth = (leaveType: 'SL' | 'CL', ym: string): number => {
+    return round2(
+      workingLedger
+        .filter(
+          (e) =>
+            e.leaveType === leaveType &&
+            (e.entryType === 'approved_deduction' || e.entryType === 'leave_reversal') &&
+            e.month === ym
+        )
+        .reduce((s, e) => s - Number(e.amount || 0), 0)
+    );
+  };
+
   for (let yr = startYear; yr <= currentYear; yr++) {
     // Process year-start rollover when stepping into a new year
     if (yr > startYear) {
@@ -442,19 +560,21 @@ export function computeEmployeeLeaveAccrualPlan(params: {
       if (!policy.sickLeaveCarryForward && policy.sickLeaveAnnualReset) {
         const priorSl = sumBalanceFor('SL', yr);
         const resetId = `reset_${employee.id}_SL_${yr}`.replace(/[^a-zA-Z0-9_-]/g, '');
-        if (priorSl !== 0 && !existingIds.has(resetId)) {
+        if (priorSl > 0 && !existingIds.has(resetId)) {
+          const currentSlBefore = sumBalanceFor('SL');
           const entry: Omit<LeaveLedgerEntry, 'createdAt'> = {
             id: resetId,
             employeeId: employee.id,
             employeeUid: employee.uid || '',
-            employeeEmail: (employee.email || '').toLowerCase(),
-            employeeName: employee.fullName,
+            employeeEmail: empEmail,
+            employeeName: empName,
             leaveType: 'SL',
             entryType: 'year_reset',
             month: `${yr}-01`,
             year: yr,
             amount: round2(-priorSl),
-            balanceAfter: 0,
+            balanceBefore: currentSlBefore,
+            balanceAfter: round2(currentSlBefore - priorSl),
             source: 'annual_cycle',
             reason: `Annual Sick Leave reset for calendar year ${yr} (non-carry-forwardable)`,
             createdBy: actorUid,
@@ -470,22 +590,28 @@ export function computeEmployeeLeaveAccrualPlan(params: {
       const priorCl = sumBalanceFor('CL', yr);
       if (policy.casualLeaveCarryForward) {
         let carried = Math.max(0, priorCl);
-        if (policy.casualLeaveMaxCarryForward && policy.casualLeaveMaxCarryForward > 0 && carried > policy.casualLeaveMaxCarryForward) {
+        if (
+          policy.casualLeaveMaxCarryForward &&
+          policy.casualLeaveMaxCarryForward > 0 &&
+          carried > policy.casualLeaveMaxCarryForward
+        ) {
           const excess = round2(carried - policy.casualLeaveMaxCarryForward);
           const capId = `reset_${employee.id}_CL_CAP_${yr}`.replace(/[^a-zA-Z0-9_-]/g, '');
           if (!existingIds.has(capId) && excess > 0) {
+            const clBeforeCap = sumBalanceFor('CL');
             const capEntry: Omit<LeaveLedgerEntry, 'createdAt'> = {
               id: capId,
               employeeId: employee.id,
               employeeUid: employee.uid || '',
-              employeeEmail: (employee.email || '').toLowerCase(),
-              employeeName: employee.fullName,
+              employeeEmail: empEmail,
+              employeeName: empName,
               leaveType: 'CL',
               entryType: 'year_reset',
               month: `${yr}-01`,
               year: yr,
               amount: round2(-excess),
-              balanceAfter: policy.casualLeaveMaxCarryForward,
+              balanceBefore: clBeforeCap,
+              balanceAfter: round2(clBeforeCap - excess),
               source: 'annual_cycle',
               reason: `Casual Leave carry-forward cap applied for ${yr} (max ${policy.casualLeaveMaxCarryForward}d)`,
               createdBy: actorUid,
@@ -504,13 +630,14 @@ export function computeEmployeeLeaveAccrualPlan(params: {
             id: cfId,
             employeeId: employee.id,
             employeeUid: employee.uid || '',
-            employeeEmail: (employee.email || '').toLowerCase(),
-            employeeName: employee.fullName,
+            employeeEmail: empEmail,
+            employeeName: empName,
             leaveType: 'CL',
             entryType: 'carry_forward',
             month: `${yr}-01`,
             year: yr,
             amount: 0,
+            balanceBefore: carried,
             balanceAfter: carried,
             source: 'annual_cycle',
             reason: `Carried forward ${carried} Casual Leave day(s) into ${yr}`,
@@ -525,18 +652,20 @@ export function computeEmployeeLeaveAccrualPlan(params: {
       } else {
         const resetClId = `reset_${employee.id}_CL_${yr}`.replace(/[^a-zA-Z0-9_-]/g, '');
         if (priorCl !== 0 && !existingIds.has(resetClId)) {
+          const clBeforeReset = sumBalanceFor('CL');
           const resetEntry: Omit<LeaveLedgerEntry, 'createdAt'> = {
             id: resetClId,
             employeeId: employee.id,
             employeeUid: employee.uid || '',
-            employeeEmail: (employee.email || '').toLowerCase(),
-            employeeName: employee.fullName,
+            employeeEmail: empEmail,
+            employeeName: empName,
             leaveType: 'CL',
             entryType: 'year_reset',
             month: `${yr}-01`,
             year: yr,
             amount: round2(-priorCl),
-            balanceAfter: 0,
+            balanceBefore: clBeforeReset,
+            balanceAfter: round2(clBeforeReset - priorCl),
             source: 'annual_cycle',
             reason: `Annual Casual Leave reset for ${yr} (carry-forward disabled in settings)`,
             createdBy: actorUid,
@@ -555,30 +684,78 @@ export function computeEmployeeLeaveAccrualPlan(params: {
     const yrEndMonth = yr === currentYear ? currentMonth : `${yr}-12`;
     const monthsInYear = enumerateYearMonths(yrStartMonth, yrEndMonth);
 
-    // For SL, only accrue months in currentYear OR prior years that still need balance history for reset
     for (const ym of monthsInYear) {
-      // Sick Leave monthly accrual
+      // 1. Non-carry-forward SL monthly expiry for immediately preceding month's unused monthly accrual
+      if (!policy.sickLeaveCarryForward && (!effectiveBaselineMonth || ym > effectiveBaselineMonth)) {
+        const prevYm = getPreviousYearMonth(ym);
+        const isYearStartAfterAnnualReset = ym.endsWith('-01') && policy.sickLeaveAnnualReset && yr > startYear;
+        const alreadySyncedPreRollout =
+          Boolean(employee.leavePolicyMigrated) &&
+          isValidYearMonth(employee.leaveLastSyncedMonth) &&
+          prevYm < employee.leaveLastSyncedMonth.trim();
+
+        if (!isYearStartAfterAnnualReset && !alreadySyncedPreRollout) {
+          const accruedPrev = sumMonthlyAccrualInMonth('SL', prevYm);
+          const usedPrev = Math.max(0, sumNetUsedInMonth('SL', prevYm));
+          const unspentMonthly = round2(Math.max(0, accruedPrev - usedPrev));
+          const availableEnteringYm = Math.max(0, sumBalanceBeforeMonth('SL', ym));
+          const toExpire = round2(Math.min(unspentMonthly, availableEnteringYm));
+          const expSlId = `exp_${employee.id}_SL_${prevYm.replace('-', '_')}`.replace(
+            /[^a-zA-Z0-9_-]/g,
+            ''
+          );
+          if (toExpire > 0 && !existingIds.has(expSlId)) {
+            const balBefore = sumBalanceFor('SL');
+            const balAfter = round2(balBefore - toExpire);
+            const expEntry: Omit<LeaveLedgerEntry, 'createdAt'> = {
+              id: expSlId,
+              employeeId: employee.id,
+              employeeUid: employee.uid || '',
+              employeeEmail: empEmail,
+              employeeName: empName,
+              leaveType: 'SL',
+              entryType: 'monthly_expiry',
+              month: ym,
+              year: yr,
+              amount: round2(-toExpire),
+              balanceBefore: balBefore,
+              balanceAfter: balAfter,
+              source: 'annual_cycle',
+              reason: `Unused monthly Sick Leave from ${prevYm} expired (non-carry-forward policy)`,
+              createdBy: actorUid,
+              createdByName: actorName,
+            };
+            workingLedger.push(expEntry);
+            newEntries.push(expEntry);
+            existingIds.add(expSlId);
+          }
+        }
+      }
+
+      // 2. Sick Leave monthly accrual
       const slEligible =
         policy.sickLeaveMonthlyRate > 0 &&
         ym >= joiningMonth &&
-        (!migrationMonth || ym > migrationMonth) &&
+        (!effectiveBaselineMonth || ym > effectiveBaselineMonth) &&
         (ym < currentMonth || todayLocal >= joiningDate);
 
       if (slEligible) {
         const slAccId = makeAccrualDocId(employee.id, 'SL', ym);
         if (!existingIds.has(slAccId)) {
-          const runningSl = round2(sumBalanceFor('SL') + policy.sickLeaveMonthlyRate);
+          const balBefore = sumBalanceFor('SL');
+          const runningSl = round2(balBefore + policy.sickLeaveMonthlyRate);
           const entry: Omit<LeaveLedgerEntry, 'createdAt'> = {
             id: slAccId,
             employeeId: employee.id,
             employeeUid: employee.uid || '',
-            employeeEmail: (employee.email || '').toLowerCase(),
-            employeeName: employee.fullName,
+            employeeEmail: empEmail,
+            employeeName: empName,
             leaveType: 'SL',
             entryType: 'monthly_accrual',
             month: ym,
             year: yr,
             amount: policy.sickLeaveMonthlyRate,
+            balanceBefore: balBefore,
             balanceAfter: runningSl,
             source: 'accrual_engine',
             reason: `Monthly Sick Leave accrual for ${ym}`,
@@ -591,31 +768,35 @@ export function computeEmployeeLeaveAccrualPlan(params: {
         }
       }
 
-      // Casual Leave monthly accrual (only after completing eligibility period)
+      // 3. Casual Leave monthly accrual (only after completing eligibility period)
       const clEligible =
         policy.casualLeaveMonthlyRate > 0 &&
         ym >= clEligibilityMonth &&
-        (!migrationMonth || ym > migrationMonth) &&
+        (!effectiveBaselineMonth || ym > effectiveBaselineMonth) &&
         (ym < currentMonth || todayLocal >= clEligibilityDate);
 
       if (clEligible) {
         const clAccId = makeAccrualDocId(employee.id, 'CL', ym);
         if (!existingIds.has(clAccId)) {
-          const runningCl = round2(sumBalanceFor('CL') + policy.casualLeaveMonthlyRate);
+          const balBefore = sumBalanceFor('CL');
+          const runningCl = round2(balBefore + policy.casualLeaveMonthlyRate);
           const entry: Omit<LeaveLedgerEntry, 'createdAt'> = {
             id: clAccId,
             employeeId: employee.id,
             employeeUid: employee.uid || '',
-            employeeEmail: (employee.email || '').toLowerCase(),
-            employeeName: employee.fullName,
+            employeeEmail: empEmail,
+            employeeName: empName,
             leaveType: 'CL',
             entryType: 'monthly_accrual',
             month: ym,
             year: yr,
             amount: policy.casualLeaveMonthlyRate,
+            balanceBefore: balBefore,
             balanceAfter: runningCl,
             source: 'accrual_engine',
-            reason: `Monthly Casual Leave accrual for ${ym} (${policy.casualLeaveEligibilityMonths}-month tenure completed on ${clEligibilityDate})`,
+            reason: employee.clEligibilityCustom
+              ? `Monthly Casual Leave accrual for ${ym} (eligible from ${clEligibilityDate})`
+              : `Monthly Casual Leave accrual for ${ym} (${policy.casualLeaveEligibilityMonths}-month tenure completed on ${clEligibilityDate})`,
             createdBy: actorUid,
             createdByName: actorName,
           };
@@ -643,18 +824,20 @@ export function computeEmployeeLeaveAccrualPlan(params: {
     const toExpire = round2(Math.max(0, expiredAccruals - totalClUsedOrExpired));
     const expId = `exp_${employee.id}_CL_${currentMonth.replace('-', '_')}`.replace(/[^a-zA-Z0-9_-]/g, '');
     if (toExpire > 0 && !existingIds.has(expId)) {
-      const runningCl = round2(sumBalanceFor('CL') - toExpire);
+      const balBefore = sumBalanceFor('CL');
+      const runningCl = round2(balBefore - toExpire);
       const expEntry: Omit<LeaveLedgerEntry, 'createdAt'> = {
         id: expId,
         employeeId: employee.id,
         employeeUid: employee.uid || '',
-        employeeEmail: (employee.email || '').toLowerCase(),
-        employeeName: employee.fullName,
+        employeeEmail: empEmail,
+        employeeName: empName,
         leaveType: 'CL',
         entryType: 'year_reset',
         month: currentMonth,
         year: currentYear,
         amount: round2(-toExpire),
+        balanceBefore: balBefore,
         balanceAfter: runningCl,
         source: 'annual_cycle',
         reason: `Configured Casual Leave expiry (${policy.casualLeaveExpiryMonths} months rule)`,
@@ -683,6 +866,16 @@ export function computeEmployeeLeaveAccrualPlan(params: {
       .filter((e) => e.leaveType === 'SL' && e.entryType === 'monthly_accrual' && e.year === currentYear)
       .reduce((s, e) => s + Number(e.amount || 0), 0)
   );
+  const slExpiredThisYear = round2(
+    workingLedger
+      .filter(
+        (e) =>
+          e.leaveType === 'SL' &&
+          (e.entryType === 'monthly_expiry' || e.entryType === 'year_reset') &&
+          e.year === currentYear
+      )
+      .reduce((s, e) => s + Math.abs(Number(e.amount || 0)), 0)
+  );
   const clAccruedThisYear = round2(
     workingLedger
       .filter((e) => e.leaveType === 'CL' && e.entryType === 'monthly_accrual' && e.year === currentYear)
@@ -706,14 +899,25 @@ export function computeEmployeeLeaveAccrualPlan(params: {
   );
   const slAdjustedThisYear = round2(
     workingLedger
-      .filter((e) => e.leaveType === 'SL' && e.entryType === 'admin_adjustment' && e.year === currentYear)
+      .filter(
+        (e) =>
+          e.leaveType === 'SL' &&
+          (e.entryType === 'admin_adjustment' || e.entryType === 'opening_balance') &&
+          e.year === currentYear
+      )
       .reduce((s, e) => s + Number(e.amount || 0), 0)
   );
   const clAdjustedTotal = round2(
     workingLedger
-      .filter((e) => e.leaveType === 'CL' && e.entryType === 'admin_adjustment')
+      .filter(
+        (e) =>
+          e.leaveType === 'CL' &&
+          (e.entryType === 'admin_adjustment' || e.entryType === 'opening_balance')
+      )
       .reduce((s, e) => s + Number(e.amount || 0), 0)
   );
+
+  const resolvedBaselineMonth = effectiveBaselineMonth || currentMonth;
 
   const hasChanges =
     newEntries.length > 0 ||
@@ -733,9 +937,11 @@ export function computeEmployeeLeaveAccrualPlan(params: {
       casualLeaveBalance: finalClBalance,
       carryForwardBalance,
       leavePolicyMigrated: true,
+      ...(resolvedBaselineMonth ? { leaveBaselineMonth: resolvedBaselineMonth } : {}),
       leaveLastSyncedMonth: currentMonth,
       leaveLastResetYear: currentYear,
       clEligibilityDate,
+      ...(employee.clEligibilityCustom ? { clEligibilityCustom: true } : {}),
       ...(employee.leaveMigrationNote ? { leaveMigrationNote: employee.leaveMigrationNote } : {}),
     },
     hasChanges,
@@ -752,6 +958,7 @@ export function computeEmployeeLeaveAccrualPlan(params: {
       migrationBaselineSl,
       migrationBaselineCl,
       slAccruedThisYear,
+      slExpiredThisYear,
       clAccruedThisYear,
       clAccruedTotal,
       slAdjustedThisYear,

@@ -80,11 +80,14 @@ export function PayrollView() {
     setLoading(true);
     try {
       const isSuperAdmin = employee.role === 'super_admin';
+      const canViewSalary =
+        isSuperAdmin ||
+        (employee.role === 'team_leader' && Boolean(settings?.teamLeaderPermissions?.canViewSalary));
       const [empList, salList, payList, attList] = await Promise.all([
-        isSuperAdmin ? fetchAllEmployees(employee) : Promise.resolve([employee]),
+        isSuperAdmin ? fetchAllEmployees(employee, true) : Promise.resolve([employee]),
         isSuperAdmin ? fetchAllSalaries() : Promise.resolve([]),
-        fetchPayrollRecords(employee),
-        fetchAttendanceRecords(employee),
+        fetchPayrollRecords(employee, canViewSalary),
+        fetchAttendanceRecords(employee, undefined, settings?.teamLeaderPermissions?.canViewAllEmployees ?? true),
       ]);
       setEmployees(empList);
       setSalaries(salList);
@@ -100,7 +103,7 @@ export function PayrollView() {
     } finally {
       setLoading(false);
     }
-  }, [employee, selectedEmpId, showToast]);
+  }, [employee, settings?.teamLeaderPermissions?.canViewSalary, settings?.teamLeaderPermissions?.canViewAllEmployees, selectedEmpId, showToast]);
 
   useEffect(() => {
     loadData();
@@ -496,8 +499,13 @@ export function PayrollView() {
                 <label className="block font-medium mb-1">Working Days</label>
                 <input
                   type="number"
+                  min={0}
+                  max={31}
                   value={workingDaysInMonth}
-                  onChange={(e) => setWorkingDaysInMonth(Number(e.target.value))}
+                  onChange={(e) => {
+                    const v = e.target.value === '' ? 0 : Number(e.target.value);
+                    setWorkingDaysInMonth(Number.isFinite(v) ? Math.max(0, Math.min(31, v)) : 0);
+                  }}
                   className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                 />
               </div>
@@ -505,8 +513,14 @@ export function PayrollView() {
                 <label className="block font-medium mb-1">Present Days</label>
                 <input
                   type="number"
+                  min={0}
+                  max={31}
+                  step="0.5"
                   value={presentDays}
-                  onChange={(e) => setPresentDays(Number(e.target.value))}
+                  onChange={(e) => {
+                    const v = e.target.value === '' ? 0 : Number(e.target.value);
+                    setPresentDays(Number.isFinite(v) ? Math.max(0, Math.min(31, v)) : 0);
+                  }}
                   className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                 />
               </div>
@@ -514,8 +528,14 @@ export function PayrollView() {
                 <label className="block font-medium mb-1">Leave Days</label>
                 <input
                   type="number"
+                  min={0}
+                  max={31}
+                  step="0.5"
                   value={leaveDays}
-                  onChange={(e) => setLeaveDays(Number(e.target.value))}
+                  onChange={(e) => {
+                    const v = e.target.value === '' ? 0 : Number(e.target.value);
+                    setLeaveDays(Number.isFinite(v) ? Math.max(0, Math.min(31, v)) : 0);
+                  }}
                   className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                 />
               </div>
@@ -529,8 +549,12 @@ export function PayrollView() {
                   <label className="block font-medium mb-1">Basic Salary</label>
                   <input
                     type="number"
+                    min={0}
                     value={basicSalary}
-                    onChange={(e) => setBasicSalary(Number(e.target.value))}
+                    onChange={(e) => {
+                      const v = e.target.value === '' ? 0 : Number(e.target.value);
+                      setBasicSalary(Number.isFinite(v) ? Math.max(0, v) : 0);
+                    }}
                     className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                   />
                 </div>
@@ -538,8 +562,12 @@ export function PayrollView() {
                   <label className="block font-medium mb-1">HRA / Housing Allowance</label>
                   <input
                     type="number"
+                    min={0}
                     value={hra}
-                    onChange={(e) => setHra(Number(e.target.value))}
+                    onChange={(e) => {
+                      const v = e.target.value === '' ? 0 : Number(e.target.value);
+                      setHra(Number.isFinite(v) ? Math.max(0, v) : 0);
+                    }}
                     className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                   />
                 </div>
@@ -547,8 +575,12 @@ export function PayrollView() {
                   <label className="block font-medium mb-1">Bonus / Incentives</label>
                   <input
                     type="number"
+                    min={0}
                     value={bonus}
-                    onChange={(e) => setBonus(Number(e.target.value))}
+                    onChange={(e) => {
+                      const v = e.target.value === '' ? 0 : Number(e.target.value);
+                      setBonus(Number.isFinite(v) ? Math.max(0, v) : 0);
+                    }}
                     className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                   />
                 </div>
@@ -566,12 +598,15 @@ export function PayrollView() {
                     />
                     <input
                       type="number"
+                      min={0}
                       value={item.amount}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const v = e.target.value === '' ? 0 : Number(e.target.value);
+                        const safe = Number.isFinite(v) ? Math.max(0, v) : 0;
                         setOtherEarnings((prev) =>
-                          prev.map((x, i) => (i === idx ? { ...x, amount: Number(e.target.value) } : x))
-                        )
-                      }
+                          prev.map((x, i) => (i === idx ? { ...x, amount: safe } : x))
+                        );
+                      }}
                       className="w-24 min-h-[38px] px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                     />
                     <button
@@ -599,8 +634,12 @@ export function PayrollView() {
                   <label className="block font-medium mb-1">Professional Tax / Standard Tax</label>
                   <input
                     type="number"
+                    min={0}
                     value={professionalTax}
-                    onChange={(e) => setProfessionalTax(Number(e.target.value))}
+                    onChange={(e) => {
+                      const v = e.target.value === '' ? 0 : Number(e.target.value);
+                      setProfessionalTax(Number.isFinite(v) ? Math.max(0, v) : 0);
+                    }}
                     className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                   />
                 </div>
@@ -618,12 +657,15 @@ export function PayrollView() {
                     />
                     <input
                       type="number"
+                      min={0}
                       value={item.amount}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const v = e.target.value === '' ? 0 : Number(e.target.value);
+                        const safe = Number.isFinite(v) ? Math.max(0, v) : 0;
                         setDeductions((prev) =>
-                          prev.map((x, i) => (i === idx ? { ...x, amount: Number(e.target.value) } : x))
-                        )
-                      }
+                          prev.map((x, i) => (i === idx ? { ...x, amount: safe } : x))
+                        );
+                      }}
                       className="w-24 min-h-[38px] px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                     />
                     <button
@@ -794,8 +836,12 @@ export function PayrollView() {
               <label className="block font-medium mb-1">Basic Salary ({salCurrency})</label>
               <input
                 type="number"
+                min={0}
                 value={salBasic}
-                onChange={(e) => setSalBasic(Number(e.target.value))}
+                onChange={(e) => {
+                  const v = e.target.value === '' ? 0 : Number(e.target.value);
+                  setSalBasic(Number.isFinite(v) ? Math.max(0, v) : 0);
+                }}
                 className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
               />
             </div>
@@ -803,8 +849,12 @@ export function PayrollView() {
               <label className="block font-medium mb-1">HRA / Housing ({salCurrency})</label>
               <input
                 type="number"
+                min={0}
                 value={salHra}
-                onChange={(e) => setSalHra(Number(e.target.value))}
+                onChange={(e) => {
+                  const v = e.target.value === '' ? 0 : Number(e.target.value);
+                  setSalHra(Number.isFinite(v) ? Math.max(0, v) : 0);
+                }}
                 className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
               />
             </div>
@@ -812,8 +862,12 @@ export function PayrollView() {
               <label className="block font-medium mb-1">Default Bonus / Incentives ({salCurrency})</label>
               <input
                 type="number"
+                min={0}
                 value={salBonus}
-                onChange={(e) => setSalBonus(Number(e.target.value))}
+                onChange={(e) => {
+                  const v = e.target.value === '' ? 0 : Number(e.target.value);
+                  setSalBonus(Number.isFinite(v) ? Math.max(0, v) : 0);
+                }}
                 className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
               />
             </div>
@@ -821,8 +875,12 @@ export function PayrollView() {
               <label className="block font-medium mb-1">Professional Tax ({salCurrency})</label>
               <input
                 type="number"
+                min={0}
                 value={salTax}
-                onChange={(e) => setSalTax(Number(e.target.value))}
+                onChange={(e) => {
+                  const v = e.target.value === '' ? 0 : Number(e.target.value);
+                  setSalTax(Number.isFinite(v) ? Math.max(0, v) : 0);
+                }}
                 className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
               />
             </div>
@@ -842,10 +900,13 @@ export function PayrollView() {
                   />
                   <input
                     type="number"
+                    min={0}
                     value={item.amount}
-                    onChange={(e) =>
-                      setSalOther((p) => p.map((x, i) => (i === idx ? { ...x, amount: Number(e.target.value) } : x)))
-                    }
+                    onChange={(e) => {
+                      const v = e.target.value === '' ? 0 : Number(e.target.value);
+                      const safe = Number.isFinite(v) ? Math.max(0, v) : 0;
+                      setSalOther((p) => p.map((x, i) => (i === idx ? { ...x, amount: safe } : x)));
+                    }}
                     className="w-24 min-h-[36px] px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                   />
                   <button
@@ -880,10 +941,13 @@ export function PayrollView() {
                   />
                   <input
                     type="number"
+                    min={0}
                     value={item.amount}
-                    onChange={(e) =>
-                      setSalDed((p) => p.map((x, i) => (i === idx ? { ...x, amount: Number(e.target.value) } : x)))
-                    }
+                    onChange={(e) => {
+                      const v = e.target.value === '' ? 0 : Number(e.target.value);
+                      const safe = Number.isFinite(v) ? Math.max(0, v) : 0;
+                      setSalDed((p) => p.map((x, i) => (i === idx ? { ...x, amount: safe } : x)));
+                    }}
                     className="w-24 min-h-[36px] px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                   />
                   <button

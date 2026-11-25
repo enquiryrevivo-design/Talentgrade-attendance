@@ -45,14 +45,38 @@ function timestampToMs(ts: unknown): number {
   return 0;
 }
 
-async function getAuthHeaders(): Promise<Record<string, string>> {
+async function fetchWithAuthRetry(url: string, init: RequestInit = {}): Promise<Response> {
   const user = auth.currentUser;
   if (!user) throw new Error('Authentication required.');
-  const token = await user.getIdToken();
-  return {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
+
+  const send = async (forceRefresh: boolean) => {
+    const token = await user.getIdToken(forceRefresh);
+    return fetch(url, {
+      ...init,
+      headers: {
+        ...(init.headers || {}),
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+    });
   };
+
+  let res = await send(false);
+  if (res.status === 401) {
+    res = await send(true);
+  }
+  return res;
+}
+
+async function extractJsonError(res: Response, fallback: string): Promise<string> {
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('application/json')) {
+    const errBody = await res.json().catch(() => null);
+    if (errBody && typeof errBody.error === 'string' && errBody.error.trim()) {
+      return errBody.error;
+    }
+  }
+  return fallback;
 }
 
 export async function fetchAttendanceRegularizations(
@@ -95,10 +119,8 @@ export async function submitAttendanceRegularization(params: {
   let normalizedPunchOut = params.requestedPunchOut.trim();
   let normalizedReason = params.reason.trim();
 
-  const headers = await getAuthHeaders();
-  const valRes = await fetch('/api/attendance/regularization/validate', {
+  const valRes = await fetchWithAuthRetry('/api/attendance/regularization/validate', {
     method: 'POST',
-    headers,
     body: JSON.stringify({
       date: params.date,
       requestType: params.requestType,
@@ -110,8 +132,9 @@ export async function submitAttendanceRegularization(params: {
   });
 
   if (!valRes.ok) {
-    const errBody = await valRes.json().catch(() => ({}));
-    throw new Error(errBody.error || 'Attendance regularization validation failed.');
+    throw new Error(
+      await extractJsonError(valRes, `Attendance regularization validation failed (HTTP ${valRes.status}).`)
+    );
   }
 
   const valData = await valRes.json();
@@ -367,10 +390,8 @@ export async function reviewAttendanceRegularization(params: {
   if (params.decision === 'Approved') {
     const preRecSnap = await getDoc(doc(db, 'attendanceRecords', params.request.attendanceRecordId));
     const preRec = preRecSnap.exists() ? (preRecSnap.data() as AttendanceRecord) : null;
-    const headers = await getAuthHeaders();
-    const res = await fetch('/api/attendance/regularization/compute-approval', {
+    const res = await fetchWithAuthRetry('/api/attendance/regularization/compute-approval', {
       method: 'POST',
-      headers,
       body: JSON.stringify({
         date: params.request.date,
         timezone: preRec?.timezone || params.request.timezone || targetSchedule.timezone,
@@ -382,8 +403,9 @@ export async function reviewAttendanceRegularization(params: {
       }),
     });
     if (!res.ok) {
-      const errBody = await res.json().catch(() => ({}));
-      throw new Error(errBody.error || 'Could not compute regularized attendance metrics.');
+      throw new Error(
+        await extractJsonError(res, `Could not compute regularized attendance metrics (HTTP ${res.status}).`)
+      );
     }
     const data = await res.json();
     serverComputed = {

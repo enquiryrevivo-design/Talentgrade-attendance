@@ -232,7 +232,12 @@ export function AdminSmartRemindersPanel({
               min={-60}
               max={120}
               value={cfg.punchInOffsetMinutes}
-              onChange={(e) => updateCfg({ punchInOffsetMinutes: Number(e.target.value) })}
+              onChange={(e) => {
+                const v = e.target.value === '' ? 0 : Number(e.target.value);
+                updateCfg({
+                  punchInOffsetMinutes: Number.isFinite(v) ? Math.max(-60, Math.min(120, v)) : 0,
+                });
+              }}
               className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
             />
             <span className="text-[11px] text-zinc-500">0 = exact start time, -10 = 10m before</span>
@@ -244,7 +249,12 @@ export function AdminSmartRemindersPanel({
               min={5}
               max={240}
               value={cfg.punchInFollowUpDelayMinutes}
-              onChange={(e) => updateCfg({ punchInFollowUpDelayMinutes: Number(e.target.value) })}
+              onChange={(e) => {
+                const v = e.target.value === '' ? 5 : Number(e.target.value);
+                updateCfg({
+                  punchInFollowUpDelayMinutes: Number.isFinite(v) ? Math.max(5, Math.min(240, v)) : 5,
+                });
+              }}
               className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
             />
           </div>
@@ -252,7 +262,10 @@ export function AdminSmartRemindersPanel({
             <label className="block font-medium mb-1">Max Reminders Per Event</label>
             <select
               value={cfg.maxRemindersPerEvent}
-              onChange={(e) => updateCfg({ maxRemindersPerEvent: Number(e.target.value) })}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                updateCfg({ maxRemindersPerEvent: v === 2 ? 2 : 1 });
+              }}
               className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
             >
               <option value={1}>1 (Initial reminder only)</option>
@@ -267,7 +280,12 @@ export function AdminSmartRemindersPanel({
               min={-60}
               max={120}
               value={cfg.punchOutOffsetMinutes}
-              onChange={(e) => updateCfg({ punchOutOffsetMinutes: Number(e.target.value) })}
+              onChange={(e) => {
+                const v = e.target.value === '' ? 0 : Number(e.target.value);
+                updateCfg({
+                  punchOutOffsetMinutes: Number.isFinite(v) ? Math.max(-60, Math.min(120, v)) : 0,
+                });
+              }}
               className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
             />
             <span className="text-[11px] text-zinc-500">-5 = 5m before shift end</span>
@@ -279,7 +297,12 @@ export function AdminSmartRemindersPanel({
               min={5}
               max={240}
               value={cfg.punchOutFollowUpDelayMinutes}
-              onChange={(e) => updateCfg({ punchOutFollowUpDelayMinutes: Number(e.target.value) })}
+              onChange={(e) => {
+                const v = e.target.value === '' ? 5 : Number(e.target.value);
+                updateCfg({
+                  punchOutFollowUpDelayMinutes: Number.isFinite(v) ? Math.max(5, Math.min(240, v)) : 5,
+                });
+              }}
               className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
             />
           </div>
@@ -290,7 +313,12 @@ export function AdminSmartRemindersPanel({
               min={1}
               max={6}
               value={cfg.maxRemindersPerDay}
-              onChange={(e) => updateCfg({ maxRemindersPerDay: Number(e.target.value) })}
+              onChange={(e) => {
+                const v = e.target.value === '' ? 1 : Number(e.target.value);
+                updateCfg({
+                  maxRemindersPerDay: Number.isFinite(v) ? Math.max(1, Math.min(6, v)) : 1,
+                });
+              }}
               className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
             />
           </div>

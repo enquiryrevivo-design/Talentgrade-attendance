@@ -84,11 +84,15 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
     if (!employee) return;
     setLoading(true);
     try {
+      const canViewAll = settings?.teamLeaderPermissions?.canViewAllEmployees ?? true;
+      const canViewSalary = settings?.teamLeaderPermissions?.canViewSalary ?? false;
       const [empList, attList, leaveList, payList] = await Promise.all([
-        employee.role === 'employee' ? Promise.resolve([employee]) : fetchAllEmployees(employee),
-        fetchAttendanceRecords(employee),
+        employee.role === 'employee'
+          ? Promise.resolve([employee])
+          : fetchAllEmployees(employee, canViewAll),
+        fetchAttendanceRecords(employee, undefined, canViewAll),
         fetchLeaveApplications(employee),
-        fetchPayrollRecords(employee),
+        fetchPayrollRecords(employee, canViewSalary),
       ]);
       setEmployees(empList);
       setAttendance(attList);

@@ -38,6 +38,7 @@ function resolveTimezoneParts(date: Date, timeZone: string): {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
+    hourCycle: 'h23',
   }).formatToParts(date);
 
   const getPart = (type: string) => parts.find((p) => p.type === type)?.value || '00';
@@ -84,8 +85,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const token = authHeader.slice('Bearer '.length).trim();
   try {
     const decoded = await getAdminAuth().verifyIdToken(token);
-    if (!decoded.email_verified) {
-      sendJson(res, 403, { error: 'Forbidden: Email verification required' });
+    if (decoded.firebase?.sign_in_provider === 'anonymous') {
+      sendJson(res, 403, { error: 'Forbidden: Anonymous authentication is not permitted' });
       return;
     }
   } catch (err) {

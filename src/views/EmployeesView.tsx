@@ -9,6 +9,7 @@ import {
   UserX,
   RefreshCw,
   Upload,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../components/Toast';
@@ -23,6 +24,7 @@ import {
   UserRole,
 } from '../types/hr';
 import {
+  adjustEmployeeLeaveBalance,
   compressImageFile,
   createEmployeeAccount,
   fetchAllEmployees,
@@ -44,6 +46,7 @@ import {
   calculateCasualLeaveEligibilityDate,
   computeEmployeeLeaveAccrualPlan,
   normalizeLeavePolicyConfig,
+  round2,
 } from '../../shared/leaveAccrualEngine';
 import { formatCelebrationMonthDayLabel } from '../../shared/celebrationEngine';
 import { useCelebrations } from '../context/CelebrationContext';
@@ -125,6 +128,8 @@ export function EmployeesView() {
     sickLeaveBalance: 1,
     casualLeaveBalance: 0,
     carryForwardBalance: 0,
+    clEligibilityDate: calculateCasualLeaveEligibilityDate(new Date().toISOString().slice(0, 10), 6),
+    clEligibilityCustom: false,
     temporaryPassword: generateTempPassword(),
     mustChangePassword: true,
   });
@@ -140,6 +145,10 @@ export function EmployeesView() {
   const [editCustomSchedule, setEditCustomSchedule] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
+  const [quickAdjType, setQuickAdjType] = useState<'SL' | 'CL'>('SL');
+  const [quickAdjDelta, setQuickAdjDelta] = useState<number>(1);
+  const [quickAdjReason, setQuickAdjReason] = useState('');
+  const [quickAdjSaving, setQuickAdjSaving] = useState(false);
   const [salaryForm, setSalaryForm] = useState({
     currency: 'INR',
     basicSalary: 0,
@@ -152,8 +161,9 @@ export function EmployeesView() {
     if (!employee) return;
     setLoading(true);
     try {
+      const canViewAll = settings?.teamLeaderPermissions?.canViewAllEmployees ?? true;
       const [empList, deptList] = await Promise.all([
-        fetchAllEmployees(employee),
+        fetchAllEmployees(employee, canViewAll),
         getDepartments(),
       ]);
       setEmployees(empList);
@@ -182,7 +192,7 @@ export function EmployeesView() {
     } finally {
       setLoading(false);
     }
-  }, [employee, showToast, newEmp.department]);
+  }, [employee, settings?.teamLeaderPermissions?.canViewAllEmployees, showToast, newEmp.department]);
 
   useEffect(() => {
     loadData();
@@ -197,7 +207,12 @@ export function EmployeesView() {
   const availableLocations =
     settings.locations && settings.locations.length > 0 ? settings.locations : ['India', 'Dubai, UAE'];
 
-  const computeOpeningBalances = (joiningDate: string, timezone: string) => {
+  const computeOpeningBalances = (
+    joiningDate: string,
+    timezone: string,
+    clEligibilityDate?: string,
+    clEligibilityCustom?: boolean
+  ) => {
     const policy = normalizeLeavePolicyConfig(settings.leavePolicy);
     const plan = computeEmployeeLeaveAccrualPlan({
       employee: {
@@ -211,6 +226,8 @@ export function EmployeesView() {
         sickLeaveBalance: 0,
         casualLeaveBalance: 0,
         carryForwardBalance: 0,
+        clEligibilityDate,
+        clEligibilityCustom,
       },
       policy,
       existingLedger: [],
@@ -226,7 +243,12 @@ export function EmployeesView() {
   const handleNewLocationChange = (loc: string) => {
     const preset = LOCATION_PRESETS[loc];
     const nextTz = preset ? preset.timezone : newEmp.timezone;
-    const summary = computeOpeningBalances(newEmp.joiningDate, nextTz);
+    const summary = computeOpeningBalances(
+      newEmp.joiningDate,
+      nextTz,
+      newEmp.clEligibilityDate,
+      newEmp.clEligibilityCustom
+    );
     setNewEmp((p) => ({
       ...p,
       location: loc,
@@ -300,6 +322,14 @@ export function EmployeesView() {
     setEditCustomSchedule(hasCustomSchedule);
 
     const effective = getEffectiveSchedule(emp, settings);
+    const policy = normalizeLeavePolicyConfig(settings.leavePolicy);
+    const computedClElig = calculateCasualLeaveEligibilityDate(
+      emp.joiningDate,
+      policy.casualLeaveEligibilityMonths
+    );
+    setQuickAdjType('SL');
+    setQuickAdjDelta(1);
+    setQuickAdjReason('');
     setEditForm({
       fullName: emp.fullName,
       email: emp.email,
@@ -324,11 +354,14 @@ export function EmployeesView() {
       sickLeaveBalance: emp.sickLeaveBalance,
       casualLeaveBalance: emp.casualLeaveBalance,
       carryForwardBalance: emp.carryForwardBalance,
+      clEligibilityDate: emp.clEligibilityDate || computedClElig,
+      clEligibilityCustom: Boolean(emp.clEligibilityCustom),
     });
 
     try {
+      const canViewAll = settings?.teamLeaderPermissions?.canViewAllEmployees ?? true;
       const [allAtt, allLeaves, allLedger] = await Promise.all([
-        fetchAttendanceRecords(employee),
+        fetchAttendanceRecords(employee, undefined, canViewAll),
         fetchLeaveApplications(employee),
         fetchLeaveLedger(employee),
       ]);
@@ -393,6 +426,8 @@ export function EmployeesView() {
           sickLeaveBalance: newEmp.sickLeaveBalance,
           casualLeaveBalance: newEmp.casualLeaveBalance,
           carryForwardBalance: newEmp.carryForwardBalance,
+          clEligibilityDate: newEmp.clEligibilityDate,
+          clEligibilityCustom: newEmp.clEligibilityCustom,
           temporaryPassword: newEmp.temporaryPassword,
           mustChangePassword: newEmp.mustChangePassword,
         },
@@ -433,6 +468,8 @@ export function EmployeesView() {
         sickLeaveBalance: resetSummary.sickLeaveBalance,
         casualLeaveBalance: resetSummary.casualLeaveBalance,
         carryForwardBalance: resetSummary.carryForwardBalance,
+        clEligibilityDate: resetSummary.clEligibilityDate,
+        clEligibilityCustom: false,
         temporaryPassword: generateTempPassword(),
         mustChangePassword: true,
       });
@@ -467,6 +504,8 @@ export function EmployeesView() {
         sickLeaveBalance: editForm.sickLeaveBalance,
         casualLeaveBalance: editForm.casualLeaveBalance,
         carryForwardBalance: editForm.carryForwardBalance,
+        clEligibilityDate: editForm.clEligibilityDate,
+        clEligibilityCustom: Boolean(editForm.clEligibilityCustom),
       };
 
       if (editCustomSchedule) {
@@ -488,6 +527,8 @@ export function EmployeesView() {
       if (selectedEmp.id === employee.id) {
         await refreshSession();
       }
+      const updatedLedger = await fetchLeaveLedger(employee).catch(() => empLedger);
+      setEmpLedger(updatedLedger.filter((x) => x.employeeId === selectedEmp.id));
       setSelectedEmp((prev) => {
         if (!prev) return null;
         const next = { ...prev, ...payload } as Employee;
@@ -605,6 +646,8 @@ export function EmployeesView() {
                 sickLeaveBalance: opening.sickLeaveBalance,
                 casualLeaveBalance: opening.casualLeaveBalance,
                 carryForwardBalance: opening.carryForwardBalance,
+                clEligibilityDate: opening.clEligibilityDate,
+                clEligibilityCustom: false,
                 temporaryPassword: generateTempPassword(),
                 officeStartTime: settings.officeStartTime || '09:30',
                 officeEndTime: settings.officeEndTime || '18:30',
@@ -985,10 +1028,22 @@ export function EmployeesView() {
                     value={newEmp.joiningDate}
                     onChange={(e) => {
                       const nextJoin = e.target.value;
-                      const opening = computeOpeningBalances(nextJoin, newEmp.timezone);
+                      const policy = normalizeLeavePolicyConfig(settings.leavePolicy);
+                      const autoClElig = calculateCasualLeaveEligibilityDate(
+                        nextJoin,
+                        policy.casualLeaveEligibilityMonths
+                      );
+                      const nextClElig = newEmp.clEligibilityCustom ? newEmp.clEligibilityDate : autoClElig;
+                      const opening = computeOpeningBalances(
+                        nextJoin,
+                        newEmp.timezone,
+                        nextClElig,
+                        newEmp.clEligibilityCustom
+                      );
                       setNewEmp((p) => ({
                         ...p,
                         joiningDate: nextJoin,
+                        ...(p.clEligibilityCustom ? {} : { clEligibilityDate: autoClElig }),
                         ...(leaveManualOverride
                           ? {}
                           : {
@@ -1028,56 +1083,94 @@ export function EmployeesView() {
                 </div>
               </div>
 
+              {/* Dedicated Leave Balance Configuration Section (Super Admin Control) */}
               {(() => {
-                const preview = computeOpeningBalances(newEmp.joiningDate, newEmp.timezone);
+                const policy = normalizeLeavePolicyConfig(settings.leavePolicy);
+                const autoClElig = calculateCasualLeaveEligibilityDate(
+                  newEmp.joiningDate,
+                  policy.casualLeaveEligibilityMonths
+                );
+                const preview = computeOpeningBalances(
+                  newEmp.joiningDate,
+                  newEmp.timezone,
+                  newEmp.clEligibilityDate,
+                  newEmp.clEligibilityCustom
+                );
                 return (
-                  <div className="p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-950/60 space-y-2.5">
-                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                      <span className="text-zinc-600 dark:text-zinc-300 font-mono tabular-nums">
-                        Policy Calc ({newEmp.joiningDate}): SL {preview.sickLeaveBalance}d · CL {preview.casualLeaveBalance}d · CL Eligible:{' '}
-                        {preview.clEligibilityDate} ({preview.isClEligible ? 'Eligible' : 'Waiting 6m'})
-                      </span>
-                      {leaveManualOverride && (
+                  <div className="p-3.5 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-950/60 space-y-3">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <div className="font-semibold text-zinc-950 dark:text-zinc-100">
+                          Leave Balance Configuration
+                        </div>
+                        <div className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                          Set this employee&apos;s starting SL, CL, and accrual commencement date. Policy accrues{' '}
+                          {policy.sickLeaveMonthlyRate} SL/mo (non-carry-forward) &amp; {policy.casualLeaveMonthlyRate}{' '}
+                          CL/mo after {policy.casualLeaveEligibilityMonths}m (carries forward).
+                        </div>
+                      </div>
+                      {(leaveManualOverride || newEmp.clEligibilityCustom) && (
                         <button
                           type="button"
                           onClick={() => {
                             setLeaveManualOverride(false);
+                            const autoSummary = computeOpeningBalances(
+                              newEmp.joiningDate,
+                              newEmp.timezone,
+                              autoClElig,
+                              false
+                            );
                             setNewEmp((p) => ({
                               ...p,
-                              sickLeaveBalance: preview.sickLeaveBalance,
-                              casualLeaveBalance: preview.casualLeaveBalance,
-                              carryForwardBalance: preview.carryForwardBalance,
+                              sickLeaveBalance: autoSummary.sickLeaveBalance,
+                              casualLeaveBalance: autoSummary.casualLeaveBalance,
+                              carryForwardBalance: autoSummary.carryForwardBalance,
+                              clEligibilityDate: autoClElig,
+                              clEligibilityCustom: false,
                             }));
                           }}
-                          className="text-[#B5121B] dark:text-red-400 font-medium underline"
+                          className="text-[#B5121B] dark:text-red-400 text-[11px] font-medium underline shrink-0"
                         >
                           Recalculate from Policy
                         </button>
                       )}
                     </div>
-                    <div className="grid grid-cols-3 gap-3">
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                       <div>
-                        <label className="block font-medium mb-1">Sick Leave (SL)</label>
+                        <label className="block font-medium mb-1">Initial Sick Leave (SL)</label>
                         <input
                           type="number"
                           step="0.5"
+                          min={-60}
+                          max={365}
                           value={newEmp.sickLeaveBalance}
                           onChange={(e) => {
+                            const val = e.target.value === '' ? 0 : Number(e.target.value);
                             setLeaveManualOverride(true);
-                            setNewEmp((p) => ({ ...p, sickLeaveBalance: Number(e.target.value) }));
+                            setNewEmp((p) => ({
+                              ...p,
+                              sickLeaveBalance: Number.isFinite(val) ? val : 0,
+                            }));
                           }}
                           className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
                         />
                       </div>
                       <div>
-                        <label className="block font-medium mb-1">Casual Leave (CL)</label>
+                        <label className="block font-medium mb-1">Initial Casual Leave (CL)</label>
                         <input
                           type="number"
                           step="0.5"
+                          min={-60}
+                          max={365}
                           value={newEmp.casualLeaveBalance}
                           onChange={(e) => {
+                            const val = e.target.value === '' ? 0 : Number(e.target.value);
                             setLeaveManualOverride(true);
-                            setNewEmp((p) => ({ ...p, casualLeaveBalance: Number(e.target.value) }));
+                            setNewEmp((p) => ({
+                              ...p,
+                              casualLeaveBalance: Number.isFinite(val) ? val : 0,
+                            }));
                           }}
                           className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
                         />
@@ -1087,14 +1180,65 @@ export function EmployeesView() {
                         <input
                           type="number"
                           step="0.5"
+                          min={0}
+                          max={365}
                           value={newEmp.carryForwardBalance}
                           onChange={(e) => {
+                            const val = e.target.value === '' ? 0 : Number(e.target.value);
                             setLeaveManualOverride(true);
-                            setNewEmp((p) => ({ ...p, carryForwardBalance: Number(e.target.value) }));
+                            setNewEmp((p) => ({
+                              ...p,
+                              carryForwardBalance: Number.isFinite(val) ? Math.max(0, val) : 0,
+                            }));
                           }}
                           className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
                         />
                       </div>
+                      <div>
+                        <label className="block font-medium mb-1">
+                          CL Eligibility Date{' '}
+                          {newEmp.clEligibilityCustom && (
+                            <span className="text-[10px] text-[#B5121B] dark:text-red-400">(Custom)</span>
+                          )}
+                        </label>
+                        <input
+                          type="date"
+                          value={newEmp.clEligibilityDate}
+                          onChange={(e) => {
+                            const nextElig = e.target.value;
+                            const isCustom = Boolean(nextElig && nextElig !== autoClElig);
+                            const nextPreview = computeOpeningBalances(
+                              newEmp.joiningDate,
+                              newEmp.timezone,
+                              nextElig,
+                              isCustom
+                            );
+                            setNewEmp((p) => ({
+                              ...p,
+                              clEligibilityDate: nextElig || autoClElig,
+                              clEligibilityCustom: isCustom,
+                              ...(leaveManualOverride
+                                ? {}
+                                : {
+                                    casualLeaveBalance: nextPreview.casualLeaveBalance,
+                                  }),
+                            }));
+                          }}
+                          className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="text-[11px] text-zinc-600 dark:text-zinc-400 font-mono tabular-nums flex flex-wrap items-center justify-between gap-2">
+                      <span>
+                        Policy default: SL {preview.policyExpectedSlToDate}d · CL {preview.policyExpectedClToDate}d · CL Eligible:{' '}
+                        {newEmp.clEligibilityDate} ({preview.isClEligible ? 'Eligible' : 'Waiting period'})
+                      </span>
+                      {leaveManualOverride && (
+                        <span className="text-zinc-700 dark:text-zinc-300 font-sans">
+                          Custom opening balance locked against Sync
+                        </span>
+                      )}
                     </div>
                   </div>
                 );
@@ -1136,8 +1280,16 @@ export function EmployeesView() {
                         <label className="block mb-1">Grace (min)</label>
                         <input
                           type="number"
+                          min={0}
+                          max={180}
                           value={newEmp.gracePeriodMinutes}
-                          onChange={(e) => setNewEmp((p) => ({ ...p, gracePeriodMinutes: Number(e.target.value) }))}
+                          onChange={(e) => {
+                            const val = e.target.value === '' ? 0 : Number(e.target.value);
+                            setNewEmp((p) => ({
+                              ...p,
+                              gracePeriodMinutes: Number.isFinite(val) ? Math.max(0, Math.min(180, val)) : 0,
+                            }));
+                          }}
                           className="w-full min-h-[38px] px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                         />
                       </div>
@@ -1508,11 +1660,17 @@ export function EmployeesView() {
                             <label className="block mb-1">Grace (m)</label>
                             <input
                               type="number"
+                              min={0}
+                              max={180}
                               disabled={!isSuperAdmin}
                               value={editForm.gracePeriodMinutes ?? 15}
-                              onChange={(e) =>
-                                setEditForm((p) => ({ ...p, gracePeriodMinutes: Number(e.target.value) }))
-                              }
+                              onChange={(e) => {
+                                const val = e.target.value === '' ? 0 : Number(e.target.value);
+                                setEditForm((p) => ({
+                                  ...p,
+                                  gracePeriodMinutes: Number.isFinite(val) ? Math.max(0, Math.min(180, val)) : 0,
+                                }));
+                              }}
                               className="w-full min-h-[38px] px-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                             />
                           </div>
@@ -1520,12 +1678,18 @@ export function EmployeesView() {
                             <label className="block mb-1">Half (h)</label>
                             <input
                               type="number"
+                              min={0.5}
+                              max={16}
                               step="0.5"
                               disabled={!isSuperAdmin}
                               value={editForm.halfDayMinHours ?? 4}
-                              onChange={(e) =>
-                                setEditForm((p) => ({ ...p, halfDayMinHours: Number(e.target.value) }))
-                              }
+                              onChange={(e) => {
+                                const val = e.target.value === '' ? 0 : Number(e.target.value);
+                                setEditForm((p) => ({
+                                  ...p,
+                                  halfDayMinHours: Number.isFinite(val) ? Math.max(0, Math.min(16, val)) : 0,
+                                }));
+                              }}
                               className="w-full min-h-[38px] px-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                             />
                           </div>
@@ -1533,12 +1697,18 @@ export function EmployeesView() {
                             <label className="block mb-1">Full (h)</label>
                             <input
                               type="number"
+                              min={1}
+                              max={24}
                               step="0.5"
                               disabled={!isSuperAdmin}
                               value={editForm.fullDayMinHours ?? 8}
-                              onChange={(e) =>
-                                setEditForm((p) => ({ ...p, fullDayMinHours: Number(e.target.value) }))
-                              }
+                              onChange={(e) => {
+                                const val = e.target.value === '' ? 0 : Number(e.target.value);
+                                setEditForm((p) => ({
+                                  ...p,
+                                  fullDayMinHours: Number.isFinite(val) ? Math.max(0, Math.min(24, val)) : 0,
+                                }));
+                              }}
                               className="w-full min-h-[38px] px-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                             />
                           </div>
@@ -1578,36 +1748,89 @@ export function EmployeesView() {
                     )}
                   </div>
 
-                  <div className="grid grid-cols-3 gap-3 pt-2 border-t border-zinc-200 dark:border-zinc-800">
-                    <div>
-                      <label className="block font-medium mb-1">Sick Leave Balance</label>
-                      <input
-                        type="number"
-                        disabled={!isSuperAdmin}
-                        value={editForm.sickLeaveBalance ?? 0}
-                        onChange={(e) => setEditForm((p) => ({ ...p, sickLeaveBalance: Number(e.target.value) }))}
-                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
-                      />
+                  <div className="pt-3 border-t border-zinc-200 dark:border-zinc-800 space-y-3">
+                    <div className="font-semibold text-zinc-950 dark:text-zinc-100">
+                      Leave Balance &amp; Eligibility Configuration
                     </div>
-                    <div>
-                      <label className="block font-medium mb-1">Casual Leave Balance</label>
-                      <input
-                        type="number"
-                        disabled={!isSuperAdmin}
-                        value={editForm.casualLeaveBalance ?? 0}
-                        onChange={(e) => setEditForm((p) => ({ ...p, casualLeaveBalance: Number(e.target.value) }))}
-                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
-                      />
-                    </div>
-                    <div>
-                      <label className="block font-medium mb-1">Carry Forward</label>
-                      <input
-                        type="number"
-                        disabled={!isSuperAdmin}
-                        value={editForm.carryForwardBalance ?? 0}
-                        onChange={(e) => setEditForm((p) => ({ ...p, carryForwardBalance: Number(e.target.value) }))}
-                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
-                      />
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <div>
+                        <label className="block font-medium mb-1">Sick Leave (SL)</label>
+                        <input
+                          type="number"
+                          step="0.5"
+                          min={-60}
+                          max={365}
+                          disabled={!isSuperAdmin}
+                          value={editForm.sickLeaveBalance ?? 0}
+                          onChange={(e) => {
+                            const val = e.target.value === '' ? 0 : Number(e.target.value);
+                            setEditForm((p) => ({
+                              ...p,
+                              sickLeaveBalance: Number.isFinite(val) ? val : 0,
+                            }));
+                          }}
+                          className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-medium mb-1">Casual Leave (CL)</label>
+                        <input
+                          type="number"
+                          step="0.5"
+                          min={-60}
+                          max={365}
+                          disabled={!isSuperAdmin}
+                          value={editForm.casualLeaveBalance ?? 0}
+                          onChange={(e) => {
+                            const val = e.target.value === '' ? 0 : Number(e.target.value);
+                            setEditForm((p) => ({
+                              ...p,
+                              casualLeaveBalance: Number.isFinite(val) ? val : 0,
+                            }));
+                          }}
+                          className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-medium mb-1">Carry Forward</label>
+                        <input
+                          type="number"
+                          step="0.5"
+                          min={0}
+                          max={365}
+                          disabled={!isSuperAdmin}
+                          value={editForm.carryForwardBalance ?? 0}
+                          onChange={(e) => {
+                            const val = e.target.value === '' ? 0 : Number(e.target.value);
+                            setEditForm((p) => ({
+                              ...p,
+                              carryForwardBalance: Number.isFinite(val) ? Math.max(0, val) : 0,
+                            }));
+                          }}
+                          className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-medium mb-1">CL Eligibility</label>
+                        <input
+                          type="date"
+                          disabled={!isSuperAdmin}
+                          value={editForm.clEligibilityDate || ''}
+                          onChange={(e) => {
+                            const nextElig = e.target.value;
+                            const autoElig = calculateCasualLeaveEligibilityDate(
+                              editForm.joiningDate || selectedEmp.joiningDate,
+                              normalizeLeavePolicyConfig(settings.leavePolicy).casualLeaveEligibilityMonths
+                            );
+                            setEditForm((p) => ({
+                              ...p,
+                              clEligibilityDate: nextElig || autoElig,
+                              clEligibilityCustom: Boolean(nextElig && nextElig !== autoElig),
+                            }));
+                          }}
+                          className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                        />
+                      </div>
                     </div>
                   </div>
 
@@ -1694,6 +1917,107 @@ export function EmployeesView() {
                     );
                   })()}
 
+                  {isSuperAdmin && (
+                    <div className="p-3.5 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-950/60 space-y-2.5">
+                      <div className="flex items-center gap-1.5 font-semibold text-zinc-950 dark:text-zinc-100">
+                        <SlidersHorizontal className="w-3.5 h-3.5" />
+                        Manual Leave Balance Adjustment (Audit Logged)
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <select
+                          value={quickAdjType}
+                          onChange={(e) => setQuickAdjType(e.target.value as 'SL' | 'CL')}
+                          className="min-h-[38px] px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900"
+                        >
+                          <option value="SL">Sick Leave (SL)</option>
+                          <option value="CL">Casual Leave (CL)</option>
+                        </select>
+                        <input
+                          type="number"
+                          step="0.5"
+                          value={quickAdjDelta}
+                          onChange={(e) => {
+                            const val = e.target.value === '' ? 0 : Number(e.target.value);
+                            setQuickAdjDelta(Number.isFinite(val) ? val : 0);
+                          }}
+                          placeholder="Delta (+/-)"
+                          className="min-h-[38px] px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
+                        />
+                        <div className="min-h-[38px] px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 flex items-center justify-between font-mono tabular-nums">
+                          <span className="text-zinc-500">New:</span>
+                          <span className="font-semibold">
+                            {round2(
+                              (quickAdjType === 'SL'
+                                ? selectedEmp.sickLeaveBalance
+                                : selectedEmp.casualLeaveBalance) + quickAdjDelta
+                            )}
+                            d
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="text"
+                          value={quickAdjReason}
+                          onChange={(e) => setQuickAdjReason(e.target.value)}
+                          placeholder="Mandatory reason for adjustment..."
+                          className="flex-1 min-h-[38px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900"
+                        />
+                        <button
+                          type="button"
+                          disabled={quickAdjSaving || !quickAdjReason.trim() || quickAdjDelta === 0}
+                          onClick={async () => {
+                            if (!selectedEmp) return;
+                            setQuickAdjSaving(true);
+                            try {
+                              await adjustEmployeeLeaveBalance({
+                                targetEmployee: selectedEmp,
+                                leaveType: quickAdjType,
+                                delta: quickAdjDelta,
+                                reason: quickAdjReason,
+                                actor: employee,
+                              });
+                              const nextBal = round2(
+                                (quickAdjType === 'SL'
+                                  ? selectedEmp.sickLeaveBalance
+                                  : selectedEmp.casualLeaveBalance) + quickAdjDelta
+                              );
+                              setSelectedEmp((prev) =>
+                                prev
+                                  ? {
+                                      ...prev,
+                                      ...(quickAdjType === 'SL'
+                                        ? { sickLeaveBalance: nextBal }
+                                        : { casualLeaveBalance: nextBal }),
+                                    }
+                                  : null
+                              );
+                              setEditForm((prev) => ({
+                                ...prev,
+                                ...(quickAdjType === 'SL'
+                                  ? { sickLeaveBalance: nextBal }
+                                  : { casualLeaveBalance: nextBal }),
+                              }));
+                              setQuickAdjReason('');
+                              await loadData();
+                              const updatedLedger = await fetchLeaveLedger(employee);
+                              setEmpLedger(updatedLedger.filter((x) => x.employeeId === selectedEmp.id));
+                              if (selectedEmp.id === employee.id) await refreshSession();
+                              showToast(`Adjusted ${quickAdjType} balance for ${selectedEmp.fullName}.`, 'success');
+                            } catch (err: unknown) {
+                              showToast(err instanceof Error ? err.message : 'Adjustment failed', 'error');
+                            } finally {
+                              setQuickAdjSaving(false);
+                            }
+                          }}
+                          className="min-h-[38px] px-4 rounded-lg bg-black dark:bg-white text-white dark:text-black font-semibold disabled:opacity-50 whitespace-nowrap"
+                        >
+                          {quickAdjSaving ? 'Saving...' : 'Apply'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="space-y-2">
                     <div className="font-semibold text-zinc-950 dark:text-zinc-100">Accrual &amp; Adjustment Ledger</div>
                     {empLedger.length === 0 ? (
@@ -1706,14 +2030,20 @@ export function EmployeesView() {
                               <div className="font-medium truncate">
                                 <span className="font-mono">{entry.month}</span> · {entry.leaveType} · {entry.entryType.replace(/_/g, ' ')}
                               </div>
-                              <div className="text-[11px] text-zinc-500 truncate">{entry.reason}</div>
+                              <div className="text-[11px] text-zinc-500 truncate">
+                                {entry.reason} · By {entry.createdByName}
+                              </div>
                             </div>
                             <div className="text-right font-mono tabular-nums shrink-0">
                               <div className={entry.amount >= 0 ? 'text-emerald-700 dark:text-emerald-400 font-semibold' : 'text-[#B5121B] dark:text-red-400 font-semibold'}>
                                 {entry.amount > 0 ? `+${entry.amount}` : entry.amount}
                               </div>
                               {typeof entry.balanceAfter === 'number' && (
-                                <div className="text-[10px] text-zinc-500">Bal: {entry.balanceAfter}</div>
+                                <div className="text-[10px] text-zinc-500">
+                                  {typeof entry.balanceBefore === 'number'
+                                    ? `${entry.balanceBefore} → ${entry.balanceAfter}`
+                                    : `Bal: ${entry.balanceAfter}`}
+                                </div>
                               )}
                             </div>
                           </div>
@@ -1762,9 +2092,16 @@ export function EmployeesView() {
                       <label className="block font-medium mb-1">Basic Salary</label>
                       <input
                         type="number"
+                        min={0}
                         disabled={!isSuperAdmin}
                         value={salaryForm.basicSalary}
-                        onChange={(e) => setSalaryForm((s) => ({ ...s, basicSalary: Number(e.target.value) }))}
+                        onChange={(e) => {
+                          const val = e.target.value === '' ? 0 : Number(e.target.value);
+                          setSalaryForm((s) => ({
+                            ...s,
+                            basicSalary: Number.isFinite(val) ? Math.max(0, val) : 0,
+                          }));
+                        }}
                         className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                       />
                     </div>
@@ -1772,9 +2109,16 @@ export function EmployeesView() {
                       <label className="block font-medium mb-1">HRA</label>
                       <input
                         type="number"
+                        min={0}
                         disabled={!isSuperAdmin}
                         value={salaryForm.hra}
-                        onChange={(e) => setSalaryForm((s) => ({ ...s, hra: Number(e.target.value) }))}
+                        onChange={(e) => {
+                          const val = e.target.value === '' ? 0 : Number(e.target.value);
+                          setSalaryForm((s) => ({
+                            ...s,
+                            hra: Number.isFinite(val) ? Math.max(0, val) : 0,
+                          }));
+                        }}
                         className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                       />
                     </div>
@@ -1782,9 +2126,16 @@ export function EmployeesView() {
                       <label className="block font-medium mb-1">Default Bonus</label>
                       <input
                         type="number"
+                        min={0}
                         disabled={!isSuperAdmin}
                         value={salaryForm.defaultBonus}
-                        onChange={(e) => setSalaryForm((s) => ({ ...s, defaultBonus: Number(e.target.value) }))}
+                        onChange={(e) => {
+                          const val = e.target.value === '' ? 0 : Number(e.target.value);
+                          setSalaryForm((s) => ({
+                            ...s,
+                            defaultBonus: Number.isFinite(val) ? Math.max(0, val) : 0,
+                          }));
+                        }}
                         className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                       />
                     </div>
@@ -1792,9 +2143,16 @@ export function EmployeesView() {
                       <label className="block font-medium mb-1">Professional Tax / Deductions</label>
                       <input
                         type="number"
+                        min={0}
                         disabled={!isSuperAdmin}
                         value={salaryForm.professionalTax}
-                        onChange={(e) => setSalaryForm((s) => ({ ...s, professionalTax: Number(e.target.value) }))}
+                        onChange={(e) => {
+                          const val = e.target.value === '' ? 0 : Number(e.target.value);
+                          setSalaryForm((s) => ({
+                            ...s,
+                            professionalTax: Number.isFinite(val) ? Math.max(0, val) : 0,
+                          }));
+                        }}
                         className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                       />
                     </div>

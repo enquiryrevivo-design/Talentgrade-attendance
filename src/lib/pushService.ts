@@ -55,14 +55,38 @@ export interface ReminderBrowserInspection {
   expiredDeviceCount: number;
 }
 
-async function getAuthHeaders(): Promise<Record<string, string>> {
+async function fetchWithAuthRetry(url: string, init: RequestInit = {}): Promise<Response> {
   const user = auth.currentUser;
   if (!user) throw new Error('Please sign in first.');
-  const token = await user.getIdToken();
-  return {
-    Authorization: `Bearer ${token}`,
-    'Content-Type': 'application/json',
+
+  const send = async (forceRefresh: boolean) => {
+    const token = await user.getIdToken(forceRefresh);
+    return fetch(url, {
+      ...init,
+      headers: {
+        ...(init.headers || {}),
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    });
   };
+
+  let res = await send(false);
+  if (res.status === 401) {
+    res = await send(true);
+  }
+  return res;
+}
+
+async function extractJsonError(res: Response, fallback: string): Promise<string> {
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('application/json')) {
+    const data = await res.json().catch(() => null);
+    if (data && typeof data.error === 'string' && data.error.trim()) {
+      return data.error;
+    }
+  }
+  return fallback;
 }
 
 export function isPushSupported(): boolean {
@@ -261,14 +285,11 @@ export async function enableAttendancePushReminders(params: {
     };
   }
 
-  const headers = await getAuthHeaders();
-  const keyResp = await fetch('/api/push/vapid-public-key', {
+  const keyResp = await fetchWithAuthRetry('/api/push/vapid-public-key', {
     method: 'GET',
-    headers,
   });
   if (!keyResp.ok) {
-    const errData = await keyResp.json().catch(() => ({}));
-    throw new Error(errData.error || 'Could not load notification encryption key.');
+    throw new Error(await extractJsonError(keyResp, 'Could not load notification encryption key.'));
   }
   const { publicKey } = (await keyResp.json()) as { publicKey: string };
   if (!publicKey) {
@@ -305,9 +326,8 @@ export async function enableAttendancePushReminders(params: {
     updatedAtIso: new Date().toISOString(),
   };
 
-  const regResp = await fetch('/api/push/subscribe', {
+  const regResp = await fetchWithAuthRetry('/api/push/subscribe', {
     method: 'POST',
-    headers,
     body: JSON.stringify({
       employeeId: params.employee.id,
       deviceLabel,
@@ -324,8 +344,7 @@ export async function enableAttendancePushReminders(params: {
   });
 
   if (!regResp.ok) {
-    const errData = await regResp.json().catch(() => ({}));
-    throw new Error(errData.error || 'Failed to register device push subscription.');
+    throw new Error(await extractJsonError(regResp, 'Failed to register device push subscription.'));
   }
   const regData = (await regResp.json()) as { subscription?: { id: string } };
   const subId = regData.subscription?.id || `sub_${params.employee.uid}_${Date.now()}`;
@@ -364,7 +383,6 @@ export async function disableAttendancePushReminders(params: {
   employee: Employee;
   thisDeviceOnly?: boolean;
 }): Promise<EmployeeReminderPreferences> {
-  const headers = await getAuthHeaders();
   let endpoint: string | undefined;
 
   if (isPushSupported()) {
@@ -380,9 +398,8 @@ export async function disableAttendancePushReminders(params: {
     }
   }
 
-  await fetch('/api/push/unsubscribe', {
+  await fetchWithAuthRetry('/api/push/unsubscribe', {
     method: 'POST',
-    headers,
     body: JSON.stringify({
       endpoint,
       disableAllForUser: !params.thisDeviceOnly,
@@ -421,15 +438,16 @@ export async function saveEmployeeReminderPreferences(params: {
     updatedAt: serverTimestamp(),
   });
 
-  const headers = await getAuthHeaders();
-  await fetch('/api/reminders/preferences', {
+  const res = await fetchWithAuthRetry('/api/reminders/preferences', {
     method: 'POST',
-    headers,
     body: JSON.stringify({
       employeeId: params.employee.id,
       preferences: nextPrefs,
     }),
   });
+  if (!res.ok) {
+    throw new Error(await extractJsonError(res, 'Failed to save reminder preferences.'));
+  }
 
   return nextPrefs;
 }
@@ -444,7 +462,6 @@ export async function syncReminderSnapshotToServer(params: {
   subscriptions: ServerSubscriptionSummary[];
   overview?: ReminderOverviewMetrics;
 }> {
-  const headers = await getAuthHeaders();
   const isAdmin = params.employee.role === 'super_admin';
 
   const employeePayload =
@@ -489,9 +506,8 @@ export async function syncReminderSnapshotToServer(params: {
         }
       : undefined;
 
-  const res = await fetch('/api/reminders/sync', {
+  const res = await fetchWithAuthRetry('/api/reminders/sync', {
     method: 'POST',
-    headers,
     body: JSON.stringify({
       company: companyPayload,
       employees: employeePayload,
@@ -517,13 +533,11 @@ export async function fetchReminderHistoryAndStatus(
   subscriptions: ServerSubscriptionSummary[];
   overview?: ReminderOverviewMetrics;
 }> {
-  const headers = await getAuthHeaders();
-  const res = await fetch(`/api/reminders/history?scope=${scope}&limit=${limit}`, {
+  const res = await fetchWithAuthRetry(`/api/reminders/history?scope=${scope}&limit=${limit}`, {
     method: 'GET',
-    headers,
   });
   if (!res.ok) {
-    throw new Error('Could not load attendance reminder history.');
+    throw new Error(await extractJsonError(res, 'Could not load attendance reminder history.'));
   }
   return (await res.json()) as {
     logs: AttendanceReminderLog[];
@@ -537,16 +551,13 @@ export async function sendTestAttendancePush(): Promise<{
   expired: number;
   failed: number;
 }> {
-  const headers = await getAuthHeaders();
-  const res = await fetch('/api/reminders/test-self', {
+  const res = await fetchWithAuthRetry('/api/reminders/test-self', {
     method: 'POST',
-    headers,
   });
-  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || 'Could not send test push notification.');
+    throw new Error(await extractJsonError(res, 'Could not send test push notification.'));
   }
-  return data as { sent: number; expired: number; failed: number };
+  return (await res.json()) as { sent: number; expired: number; failed: number };
 }
 
 export async function triggerAdminReminderRunNow(): Promise<{
@@ -557,14 +568,11 @@ export async function triggerAdminReminderRunNow(): Promise<{
   failed: number;
   overview?: ReminderOverviewMetrics;
 }> {
-  const headers = await getAuthHeaders();
-  const res = await fetch('/api/reminders/run-now', {
+  const res = await fetchWithAuthRetry('/api/reminders/run-now', {
     method: 'POST',
-    headers,
   });
-  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || 'Failed to run attendance reminder evaluation.');
+    throw new Error(await extractJsonError(res, 'Failed to run attendance reminder evaluation.'));
   }
-  return data;
+  return res.json();
 }

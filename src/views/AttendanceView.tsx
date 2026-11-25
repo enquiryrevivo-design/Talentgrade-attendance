@@ -199,10 +199,13 @@ export function AttendanceView({ onNavigate }: { onNavigate?: (page: AppPage) =>
     if (!employee) return;
     setLoading(true);
     try {
+      const canViewAll = settings?.teamLeaderPermissions?.canViewAllEmployees ?? true;
       const [recList, regList, empList, leaveList] = await Promise.all([
-        fetchAttendanceRecords(employee),
+        fetchAttendanceRecords(employee, undefined, canViewAll),
         fetchAttendanceRegularizations(employee, canApproveCorrections),
-        employee.role === 'employee' ? Promise.resolve([employee]) : fetchAllEmployees(employee),
+        employee.role === 'employee'
+          ? Promise.resolve([employee])
+          : fetchAllEmployees(employee, canViewAll),
         fetchLeaveApplications(employee),
       ]);
       setRecords(recList);

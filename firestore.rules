@@ -8,8 +8,14 @@ service cloud.firestore {
     }
 
     // --- Primitive Helpers ---
-    function isSignedIn() {
-      return request.auth != null && request.auth.token.email_verified == true;
+    // Authenticated non-anonymous user (supports both Google OAuth and Super-Admin-provisioned Email/Password users)
+    function hasAuth() {
+      return request.auth != null && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    // Verified email is strictly required before trusting token.email against employee records or admin email
+    function hasVerifiedEmail() {
+      return hasAuth() && request.auth.token.email_verified == true;
     }
 
     function isValidId(id) {
@@ -25,12 +31,12 @@ service cloud.firestore {
     }
 
     function isBootstrappedAdmin() {
-      return isSignedIn() && request.auth.token.email == 'enquiry.revivo@gmail.com';
+      return hasVerifiedEmail() && request.auth.token.email == 'enquiry.revivo@gmail.com';
     }
 
     function isSuperAdmin() {
       return isBootstrappedAdmin() || (
-        isSignedIn() &&
+        hasAuth() &&
         exists(/databases/$(database)/documents/roles/$(request.auth.uid)) &&
         get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.role == 'super_admin' &&
         get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.status == 'Active'
@@ -38,7 +44,7 @@ service cloud.firestore {
     }
 
     function isTeamLeader() {
-      return isSignedIn() &&
+      return hasAuth() &&
         exists(/databases/$(database)/documents/roles/$(request.auth.uid)) &&
         get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.role == 'team_leader' &&
         get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.status == 'Active';
@@ -46,7 +52,7 @@ service cloud.firestore {
 
     function isActiveEmployee() {
       return isBootstrappedAdmin() || (
-        isSignedIn() &&
+        hasAuth() &&
         exists(/databases/$(database)/documents/roles/$(request.auth.uid)) &&
         get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.status == 'Active'
       );
@@ -146,8 +152,8 @@ service cloud.firestore {
           'officeStartTime', 'officeEndTime', 'gracePeriodMinutes',
           'halfDayMinHours', 'fullDayMinHours', 'workingDays',
           'managerUid', 'profilePhotoAssetId', 'sickLeaveBalance', 'casualLeaveBalance',
-          'carryForwardBalance', 'leavePolicyMigrated', 'leaveLastSyncedMonth',
-          'leaveLastResetYear', 'clEligibilityDate', 'leaveMigrationNote', 'reminderPreferences',
+          'carryForwardBalance', 'leavePolicyMigrated', 'leaveBaselineMonth', 'leaveLastSyncedMonth',
+          'leaveLastResetYear', 'clEligibilityDate', 'clEligibilityCustom', 'leaveMigrationNote', 'reminderPreferences',
           'mustChangePassword', 'failedLoginAttempts',
           'lockedUntil', 'createdAt', 'updatedAt'
         ]) &&
@@ -179,9 +185,11 @@ service cloud.firestore {
         data.casualLeaveBalance is number && data.casualLeaveBalance >= -60 && data.casualLeaveBalance <= 365 &&
         data.carryForwardBalance is number && data.carryForwardBalance >= 0 && data.carryForwardBalance <= 365 &&
         (!( 'leavePolicyMigrated' in data ) || data.leavePolicyMigrated is bool) &&
+        isOptionalStringSize(data, 'leaveBaselineMonth', 7) &&
         isOptionalStringSize(data, 'leaveLastSyncedMonth', 7) &&
         (!( 'leaveLastResetYear' in data ) || (data.leaveLastResetYear is number && data.leaveLastResetYear >= 2000 && data.leaveLastResetYear <= 2100)) &&
         isOptionalStringSize(data, 'clEligibilityDate', 10) &&
+        (!( 'clEligibilityCustom' in data ) || data.clEligibilityCustom is bool) &&
         isOptionalStringSize(data, 'leaveMigrationNote', 300) &&
         (!( 'reminderPreferences' in data ) || data.reminderPreferences is map) &&
         data.mustChangePassword is bool &&
@@ -407,7 +415,7 @@ service cloud.firestore {
         ]) &&
         data.keys().hasOnly([
           'employeeId', 'employeeUid', 'employeeEmail', 'employeeName', 'leaveType',
-          'entryType', 'month', 'year', 'amount', 'balanceAfter', 'source',
+          'entryType', 'month', 'year', 'amount', 'balanceBefore', 'balanceAfter', 'source',
           'referenceId', 'reason', 'createdBy', 'createdByName', 'createdAt'
         ]) &&
         isStringSize(data.employeeId, 1, 128) &&
@@ -415,10 +423,11 @@ service cloud.firestore {
         isStringSize(data.employeeEmail, 3, 120) &&
         isStringSize(data.employeeName, 1, 120) &&
         data.leaveType in ['SL', 'CL', 'LWP'] &&
-        data.entryType in ['monthly_accrual', 'year_reset', 'carry_forward', 'approved_deduction', 'leave_reversal', 'admin_adjustment', 'migration_baseline'] &&
+        data.entryType in ['monthly_accrual', 'monthly_expiry', 'year_reset', 'carry_forward', 'approved_deduction', 'leave_reversal', 'admin_adjustment', 'migration_baseline', 'opening_balance'] &&
         isStringSize(data.month, 7, 7) &&
         data.year is number && data.year >= 2000 && data.year <= 2100 &&
         data.amount is number && data.amount >= -365 && data.amount <= 365 &&
+        (!( 'balanceBefore' in data ) || (data.balanceBefore is number && data.balanceBefore >= -365 && data.balanceBefore <= 365)) &&
         (!( 'balanceAfter' in data ) || (data.balanceAfter is number && data.balanceAfter >= -365 && data.balanceAfter <= 365)) &&
         data.source in ['accrual_engine', 'annual_cycle', 'leave_approval', 'leave_reversal', 'admin_manual', 'legacy_migration'] &&
         isOptionalStringSize(data, 'referenceId', 160) &&
@@ -641,18 +650,18 @@ service cloud.firestore {
     // --- Collection Rules ---
 
     match /test/{docId} {
-      allow get: if isSignedIn();
+      allow get: if hasAuth();
     }
 
     match /companySettings/{settingId} {
-      allow get: if isSignedIn() && isValidId(settingId);
+      allow get: if hasAuth() && isValidId(settingId);
       allow list: if isSuperAdmin();
       allow create, update: if isSuperAdmin() && isValidId(settingId) && isValidCompanySettings(incoming());
       allow delete: if false;
     }
 
     match /departments/{deptId} {
-      allow get: if isSignedIn() && isValidId(deptId);
+      allow get: if hasAuth() && isValidId(deptId);
       allow list: if isActiveEmployee();
       allow create: if isSuperAdmin() && isValidId(deptId) && isValidDepartment(incoming()) && incoming().createdAt == request.time;
       allow update: if isSuperAdmin() && isValidId(deptId) && isValidDepartment(incoming()) && incoming().createdAt == existing().createdAt;
@@ -660,16 +669,21 @@ service cloud.firestore {
     }
 
     match /roles/{uid} {
-      allow get: if isSignedIn() && isValidId(uid) && (request.auth.uid == uid || isSuperAdmin());
+      allow get: if hasAuth() && isValidId(uid) && (request.auth.uid == uid || isSuperAdmin());
       allow list: if isSuperAdmin();
       allow create: if isValidId(uid) && isValidRoleEntry(incoming()) && (
         isSuperAdmin() ||
         (isBootstrappedAdmin() && uid == request.auth.uid && incoming().role == 'super_admin') ||
-        (isSignedIn() && uid == request.auth.uid &&
+        (hasAuth() && uid == request.auth.uid &&
           exists(/databases/$(database)/documents/employees/$(incoming().employeeId)) &&
-          get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.email == request.auth.token.email &&
           get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.role == incoming().role &&
-          get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.status == incoming().status)
+          get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.status == incoming().status &&
+          (
+            get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.uid == request.auth.uid ||
+            (hasVerifiedEmail() &&
+             get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.uid == '' &&
+             get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.email == request.auth.token.email)
+          ))
       );
       allow update: if isValidId(uid) && isValidRoleEntry(incoming()) && (
         isSuperAdmin() ||
@@ -679,16 +693,19 @@ service cloud.firestore {
     }
 
     match /employees/{employeeId} {
-      allow get: if isSignedIn() && isValidId(employeeId) && (
+      allow get: if hasAuth() && isValidId(employeeId) && (
         isSuperAdmin() ||
-        existing().uid == request.auth.uid ||
-        existing().email == request.auth.token.email ||
-        (isTeamLeader() && (existing().managerUid == request.auth.uid || hasLeaderPermission('canViewAllEmployees')))
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && (
+          existing().uid == request.auth.uid ||
+          (hasVerifiedEmail() && existing().email == request.auth.token.email) ||
+          (isTeamLeader() && (existing().managerUid == request.auth.uid || hasLeaderPermission('canViewAllEmployees')))
+        ))
       );
-      allow list: if isSignedIn() && (
+      allow list: if hasAuth() && (
         isBootstrappedAdmin() ||
         resource.data.uid == request.auth.uid ||
-        resource.data.email == request.auth.token.email ||
+        (hasVerifiedEmail() && resource.data.email == request.auth.token.email) ||
         resource.data.managerUid == request.auth.uid ||
         isSuperAdmin() ||
         hasLeaderPermission('canViewAllEmployees')
@@ -701,7 +718,7 @@ service cloud.firestore {
         isSuperAdmin() ||
         (hasLeaderPermission('canApproveLeaves') &&
           incoming().diff(existing()).affectedKeys().hasOnly(['sickLeaveBalance', 'casualLeaveBalance', 'carryForwardBalance', 'updatedAt'])) ||
-        (isSignedIn() && existing().email == request.auth.token.email && (existing().uid == '' || existing().uid == request.auth.uid) &&
+        (hasVerifiedEmail() && existing().email == request.auth.token.email && (existing().uid == '' || existing().uid == request.auth.uid) &&
           incoming().uid == request.auth.uid &&
           incoming().diff(existing()).affectedKeys().hasOnly(['uid', 'mustChangePassword', 'failedLoginAttempts', 'lockedUntil', 'updatedAt'])) ||
         (isActiveEmployee() && existing().uid == request.auth.uid &&
@@ -718,7 +735,7 @@ service cloud.firestore {
     }
 
     match /attendanceRecords/{recordId} {
-      allow get: if isSignedIn() && isValidId(recordId) && (
+      allow get: if hasAuth() && isValidId(recordId) && (
         isSuperAdmin() ||
         (isActiveEmployee() && resource == null) ||
         (resource != null && (
@@ -726,7 +743,7 @@ service cloud.firestore {
           (isTeamLeader() && (existing().managerUid == request.auth.uid || hasLeaderPermission('canViewAllEmployees')))
         ))
       );
-      allow list: if isSignedIn() && (
+      allow list: if hasAuth() && (
         isBootstrappedAdmin() ||
         resource.data.employeeUid == request.auth.uid ||
         resource.data.managerUid == request.auth.uid ||
@@ -763,12 +780,15 @@ service cloud.firestore {
     }
 
     match /attendancePhotos/{photoId} {
-      allow get: if isSignedIn() && isValidId(photoId) && (
+      allow get: if hasAuth() && isValidId(photoId) && (
         isSuperAdmin() ||
-        existing().employeeUid == request.auth.uid ||
-        isTeamLeader()
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && (
+          existing().employeeUid == request.auth.uid ||
+          isTeamLeader()
+        ))
       );
-      allow list: if isSignedIn() && (
+      allow list: if hasAuth() && (
         isBootstrappedAdmin() ||
         resource.data.employeeUid == request.auth.uid ||
         isSuperAdmin() ||
@@ -781,13 +801,16 @@ service cloud.firestore {
     }
 
     match /mediaAssets/{assetId} {
-      allow get: if isSignedIn() && isValidId(assetId) && (
-        existing().assetType == 'company_logo' ||
-        existing().assetType == 'profile_photo' ||
-        existing().ownerUid == request.auth.uid ||
-        isLeaderOrAdmin()
+      allow get: if hasAuth() && isValidId(assetId) && (
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && (
+          existing().assetType == 'company_logo' ||
+          existing().assetType == 'profile_photo' ||
+          existing().ownerUid == request.auth.uid ||
+          isLeaderOrAdmin()
+        ))
       );
-      allow list: if isSignedIn() && (
+      allow list: if hasAuth() && (
         isBootstrappedAdmin() ||
         resource.data.ownerUid == request.auth.uid ||
         resource.data.assetType == 'company_logo' ||
@@ -796,16 +819,17 @@ service cloud.firestore {
       allow create: if isValidId(assetId) && isValidMediaAsset(incoming()) && isActiveEmployee() &&
         (incoming().ownerUid == request.auth.uid || isSuperAdmin());
       allow update: if false;
-      allow delete: if isValidId(assetId) && (isSuperAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+      allow delete: if isValidId(assetId) && (isSuperAdmin() || (hasAuth() && resource != null && existing().ownerUid == request.auth.uid));
     }
 
     match /attendanceCorrections/{correctionId} {
-      allow get: if isSignedIn() && isValidId(correctionId) && (
+      allow get: if hasAuth() && isValidId(correctionId) && (
         isSuperAdmin() ||
         hasLeaderPermission('canApproveCorrections') ||
-        existing().employeeUid == request.auth.uid
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && existing().employeeUid == request.auth.uid)
       );
-      allow list: if isSignedIn() && (
+      allow list: if hasAuth() && (
         isBootstrappedAdmin() ||
         isSuperAdmin() ||
         hasLeaderPermission('canApproveCorrections') ||
@@ -824,17 +848,17 @@ service cloud.firestore {
           'status', 'reviewedBy', 'reviewedByName', 'reviewedByRole', 'reviewComment', 'reviewedAt', 'appliedChanges'
         ]) && (
           isSuperAdmin() ||
-          hasLeaderPermission('canApproveCorrections')
+          (hasLeaderPermission('canApproveCorrections') && existing().employeeUid != request.auth.uid)
         );
       allow delete: if isSuperAdmin() && isValidId(correctionId);
     }
 
     match /regularizationLocks/{lockId} {
-      allow get: if isSignedIn() && isValidId(lockId) && (
+      allow get: if hasAuth() && isValidId(lockId) && (
         isSuperAdmin() ||
         hasLeaderPermission('canApproveCorrections') ||
-        resource == null ||
-        existing().employeeUid == request.auth.uid
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && existing().employeeUid == request.auth.uid)
       );
       allow list: if false;
       allow create: if isValidId(lockId) &&
@@ -843,14 +867,20 @@ service cloud.firestore {
         incoming().employeeUid == request.auth.uid &&
         lockId == (incoming().employeeId + '_' + incoming().date + '_' + incoming().requestType);
       allow update: if false;
-      allow delete: if isValidId(lockId) && (isSuperAdmin() || hasLeaderPermission('canApproveCorrections'));
+      allow delete: if isValidId(lockId) && (
+        isSuperAdmin() ||
+        (hasLeaderPermission('canApproveCorrections') && (resource == null || existing().employeeUid != request.auth.uid))
+      );
     }
 
     match /hrNotifications/{notifId} {
-      allow get: if isSignedIn() && isValidId(notifId) && isActiveEmployee() && (
+      allow get: if hasAuth() && isValidId(notifId) && isActiveEmployee() && (
         isSuperAdmin() ||
-        existing().targetUid == request.auth.uid ||
-        (existing().audienceType == 'reviewers' && hasLeaderPermission('canApproveCorrections'))
+        resource == null ||
+        (resource != null && (
+          existing().targetUid == request.auth.uid ||
+          (existing().audienceType == 'reviewers' && hasLeaderPermission('canApproveCorrections'))
+        ))
       );
       allow list: if isBootstrappedAdmin() || isSuperAdmin() || (
         isActiveEmployee() && (
@@ -873,10 +903,13 @@ service cloud.firestore {
     }
 
     match /leaveApplications/{leaveId} {
-      allow get: if isSignedIn() && isValidId(leaveId) && (
-        isSuperAdmin() || isTeamLeader() || existing().employeeUid == request.auth.uid
+      allow get: if hasAuth() && isValidId(leaveId) && (
+        isSuperAdmin() ||
+        isTeamLeader() ||
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && existing().employeeUid == request.auth.uid)
       );
-      allow list: if isSignedIn() && (
+      allow list: if hasAuth() && (
         isBootstrappedAdmin() ||
         resource.data.employeeUid == request.auth.uid ||
         resource.data.managerUid == request.auth.uid ||
@@ -893,7 +926,10 @@ service cloud.firestore {
       allow update: if isValidId(leaveId) && isValidLeaveApplication(incoming()) &&
         incoming().createdAt == existing().createdAt && (
         isSuperAdmin() ||
-        (hasLeaderPermission('canApproveLeaves') && existing().status == 'Pending' && incoming().status in ['Approved', 'Rejected'] &&
+        (hasLeaderPermission('canApproveLeaves') &&
+          existing().employeeUid != request.auth.uid &&
+          existing().status == 'Pending' &&
+          incoming().status in ['Approved', 'Rejected'] &&
           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'balanceDeducted', 'deductedAmount', 'reviewedBy', 'reviewedByName', 'reviewComment', 'reviewedAt'])) ||
         (isActiveEmployee() && existing().employeeUid == request.auth.uid && existing().status == 'Pending' &&
           incoming().status == 'Cancelled' &&
@@ -903,18 +939,21 @@ service cloud.firestore {
     }
 
     match /leaveLedger/{entryId} {
-      allow get: if isSignedIn() && isValidId(entryId) && (
+      allow get: if hasAuth() && isValidId(entryId) && (
         isSuperAdmin() ||
         isTeamLeader() ||
-        existing().employeeUid == request.auth.uid ||
-        existing().employeeEmail == request.auth.token.email
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && (
+          existing().employeeUid == request.auth.uid ||
+          (hasVerifiedEmail() && existing().employeeEmail == request.auth.token.email)
+        ))
       );
-      allow list: if isSignedIn() && (
+      allow list: if hasAuth() && (
         isBootstrappedAdmin() ||
         isSuperAdmin() ||
         isTeamLeader() ||
         resource.data.employeeUid == request.auth.uid ||
-        resource.data.employeeEmail == request.auth.token.email
+        (hasVerifiedEmail() && resource.data.employeeEmail == request.auth.token.email)
       );
       allow create: if isValidId(entryId) && isValidLeaveLedgerEntry(incoming()) &&
         incoming().createdAt == request.time && (
@@ -925,12 +964,13 @@ service cloud.firestore {
     }
 
     match /payrollRecords/{payrollId} {
-      allow get: if isSignedIn() && isValidId(payrollId) && (
+      allow get: if hasAuth() && isValidId(payrollId) && (
         isSuperAdmin() ||
         hasLeaderPermission('canViewSalary') ||
-        (existing().employeeUid == request.auth.uid && existing().status == 'Published')
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && existing().employeeUid == request.auth.uid && existing().status == 'Published')
       );
-      allow list: if isSignedIn() && (
+      allow list: if hasAuth() && (
         isBootstrappedAdmin() ||
         isSuperAdmin() ||
         hasLeaderPermission('canViewSalary') ||
@@ -960,7 +1000,12 @@ service cloud.firestore {
           get(/databases/$(database)/documents/employees/$(employeeId)).data.uid == request.auth.uid &&
           incoming().status == get(/databases/$(database)/documents/employees/$(employeeId)).data.status &&
           incoming().joiningDate == get(/databases/$(database)/documents/employees/$(employeeId)).data.joiningDate &&
-          (!( 'birthdayMonthDay' in incoming() ) || incoming().birthdayMonthDay == get(/databases/$(database)/documents/employees/$(employeeId)).data.get('birthdayMonthDay', '')))
+          (!( 'birthdayMonthDay' in incoming() ) ||
+            incoming().birthdayMonthDay == get(/databases/$(database)/documents/employees/$(employeeId)).data.get('birthdayMonthDay', '') ||
+            ('dateOfBirth' in get(/databases/$(database)/documents/employees/$(employeeId)).data &&
+             get(/databases/$(database)/documents/employees/$(employeeId)).data.dateOfBirth is string &&
+             get(/databases/$(database)/documents/employees/$(employeeId)).data.dateOfBirth.size() == 10 &&
+             get(/databases/$(database)/documents/employees/$(employeeId)).data.dateOfBirth[5:10] == incoming().birthdayMonthDay)))
       );
       allow delete: if isValidId(employeeId) && isSuperAdmin();
     }
@@ -968,10 +1013,13 @@ service cloud.firestore {
     match /celebrationNotifications/{notificationId} {
       allow get: if isValidId(notificationId) && isActiveEmployee() && (
         isSuperAdmin() ||
-        existing().employeeUid == request.auth.uid ||
-        existing().audienceScope == 'all_active' ||
-        (existing().audienceScope == 'leaders_only' && isLeaderOrAdmin()) ||
-        (existing().audienceScope == 'department' && existing().department == getCallerDepartment())
+        resource == null ||
+        (resource != null && (
+          existing().employeeUid == request.auth.uid ||
+          existing().audienceScope == 'all_active' ||
+          (existing().audienceScope == 'leaders_only' && isLeaderOrAdmin()) ||
+          (existing().audienceScope == 'department' && existing().department == getCallerDepartment())
+        ))
       );
       allow list: if isBootstrappedAdmin() || isSuperAdmin() || (
         isActiveEmployee() && (
@@ -992,8 +1040,11 @@ service cloud.firestore {
     }
 
     match /notificationReads/{readId} {
-      allow get: if isValidId(readId) && isSignedIn() && existing().uid == request.auth.uid;
-      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow get: if isValidId(readId) && hasAuth() && (
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && existing().uid == request.auth.uid)
+      );
+      allow list: if hasAuth() && resource.data.uid == request.auth.uid;
       allow create, update: if isValidId(readId) &&
         isActiveEmployee() &&
         isValidNotificationRead(incoming()) &&
@@ -1001,7 +1052,7 @@ service cloud.firestore {
           exists(/databases/$(database)/documents/celebrationNotifications/$(incoming().notificationId)) ||
           exists(/databases/$(database)/documents/hrNotifications/$(incoming().notificationId))
         );
-      allow delete: if isValidId(readId) && isSignedIn() && (existing().uid == request.auth.uid || isSuperAdmin());
+      allow delete: if isValidId(readId) && hasAuth() && (isSuperAdmin() || (resource != null && existing().uid == request.auth.uid));
     }
 
     match /celebrationWishes/{wishId} {
@@ -1016,24 +1067,28 @@ service cloud.firestore {
       allow update: if false;
       allow delete: if isValidId(wishId) && (
         isSuperAdmin() ||
-        (isActiveEmployee() && existing().authorUid == request.auth.uid)
+        (isActiveEmployee() && resource != null && existing().authorUid == request.auth.uid)
       );
     }
 
     match /pushSubscriptions/{subId} {
-      allow get: if isSignedIn() && isValidId(subId) && existing().employeeUid == request.auth.uid;
-      allow list: if isSignedIn() && resource.data.employeeUid == request.auth.uid;
-      allow create, update: if isSignedIn() && isValidId(subId) && isActiveEmployee() && isValidPushSubscription(incoming());
-      allow delete: if isSignedIn() && isValidId(subId) && existing().employeeUid == request.auth.uid;
+      allow get: if hasAuth() && isValidId(subId) && (
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && existing().employeeUid == request.auth.uid)
+      );
+      allow list: if hasAuth() && resource.data.employeeUid == request.auth.uid;
+      allow create, update: if hasAuth() && isValidId(subId) && isActiveEmployee() && isValidPushSubscription(incoming());
+      allow delete: if hasAuth() && isValidId(subId) && resource != null && existing().employeeUid == request.auth.uid;
     }
 
     match /attendanceReminderLogs/{logId} {
-      allow get: if isSignedIn() && isValidId(logId) && (
+      allow get: if hasAuth() && isValidId(logId) && (
         isSuperAdmin() ||
-        existing().employeeUid == request.auth.uid
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && existing().employeeUid == request.auth.uid)
       );
       allow list: if isBootstrappedAdmin() || isSuperAdmin() || (
-        isSignedIn() && resource.data.employeeUid == request.auth.uid
+        hasAuth() && resource.data.employeeUid == request.auth.uid
       );
       allow create: if isValidId(logId) && isActiveEmployee() && isValidAttendanceReminderLog(incoming()) && (
         isSuperAdmin() ||

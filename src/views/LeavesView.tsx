@@ -41,6 +41,7 @@ import {
 import {
   computeEmployeeLeaveAccrualPlan,
   normalizeLeavePolicyConfig,
+  round2,
 } from '../../shared/leaveAccrualEngine';
 
 function readFileAsDataUrl(file: File): Promise<string> {
@@ -60,6 +61,8 @@ function formatEntryTypeLabel(entryType: LeaveLedgerEntry['entryType']): string 
   switch (entryType) {
     case 'monthly_accrual':
       return 'Monthly Accrual';
+    case 'monthly_expiry':
+      return 'Monthly Expiry';
     case 'year_reset':
       return 'Annual Reset';
     case 'carry_forward':
@@ -72,6 +75,8 @@ function formatEntryTypeLabel(entryType: LeaveLedgerEntry['entryType']): string 
       return 'Admin Adjustment';
     case 'migration_baseline':
       return 'Legacy Baseline';
+    case 'opening_balance':
+      return 'Opening Balance';
     default:
       return entryType;
   }
@@ -124,7 +129,9 @@ export function LeavesView() {
   // Admin Manual Balance Adjustment Modal
   const [adjustTarget, setAdjustTarget] = useState<Employee | null>(null);
   const [adjustLeaveType, setAdjustLeaveType] = useState<'SL' | 'CL'>('SL');
+  const [adjustMode, setAdjustMode] = useState<'delta' | 'set'>('delta');
   const [adjustDelta, setAdjustDelta] = useState<number>(1);
+  const [adjustExactTarget, setAdjustExactTarget] = useState<number>(0);
   const [adjustCfDelta, setAdjustCfDelta] = useState<number>(0);
   const [adjustReason, setAdjustReason] = useState('');
   const [adjusting, setAdjusting] = useState(false);
@@ -136,9 +143,12 @@ export function LeavesView() {
     if (!employee) return;
     setLoading(true);
     try {
+      const canViewAll = settings?.teamLeaderPermissions?.canViewAllEmployees ?? true;
       const [leaveList, empList, deptList, ledgerList] = await Promise.all([
         fetchLeaveApplications(employee),
-        employee.role === 'employee' ? Promise.resolve([employee]) : fetchAllEmployees(employee),
+        employee.role === 'employee'
+          ? Promise.resolve([employee])
+          : fetchAllEmployees(employee, canViewAll),
         getDepartments(),
         fetchLeaveLedger(employee),
       ]);
@@ -162,7 +172,7 @@ export function LeavesView() {
           setLastSyncedAt(syncRes.serverTimeIso);
           if (syncRes.committedEntriesCount > 0 || syncRes.updatedEmployeesCount > 0) {
             const [refreshedEmps, refreshedLedger] = await Promise.all([
-              fetchAllEmployees(employee),
+              fetchAllEmployees(employee, canViewAll),
               fetchLeaveLedger(employee),
             ]);
             setEmployees(refreshedEmps);
@@ -175,8 +185,12 @@ export function LeavesView() {
               );
             }
           }
-        } catch (syncErr) {
-          console.warn('Auto accrual sync skipped:', syncErr);
+        } catch (syncErr: unknown) {
+          console.warn('Auto accrual sync failed:', syncErr);
+          showToast(
+            syncErr instanceof Error ? syncErr.message : 'Automatic leave accrual sync failed.',
+            'error'
+          );
         } finally {
           setSyncing(false);
         }
@@ -246,8 +260,9 @@ export function LeavesView() {
         leaves,
       });
       setLastSyncedAt(syncRes.serverTimeIso);
+      const canViewAll = settings?.teamLeaderPermissions?.canViewAllEmployees ?? true;
       const [refreshedEmps, refreshedLedger] = await Promise.all([
-        fetchAllEmployees(employee),
+        fetchAllEmployees(employee, canViewAll),
         fetchLeaveLedger(employee),
       ]);
       setEmployees(refreshedEmps);
@@ -340,14 +355,17 @@ export function LeavesView() {
       await adjustEmployeeLeaveBalance({
         targetEmployee: adjustTarget,
         leaveType: adjustLeaveType,
-        delta: adjustDelta,
+        delta: adjustMode === 'delta' ? adjustDelta : 0,
+        targetBalance: adjustMode === 'set' ? adjustExactTarget : undefined,
         carryForwardDelta: adjustLeaveType === 'CL' && adjustCfDelta !== 0 ? adjustCfDelta : undefined,
         reason: adjustReason,
         actor: employee,
       });
       showToast(`Updated ${adjustLeaveType} balance for ${adjustTarget.fullName}.`, 'success');
       setAdjustTarget(null);
+      setAdjustMode('delta');
       setAdjustDelta(1);
+      setAdjustExactTarget(0);
       setAdjustCfDelta(0);
       setAdjustReason('');
       await loadData();
@@ -536,8 +554,8 @@ export function LeavesView() {
                     <th className="py-2.5 px-4 font-medium">Leave Type</th>
                     <th className="py-2.5 px-4 font-medium">Event</th>
                     <th className="py-2.5 px-4 font-medium text-right">Change</th>
-                    <th className="py-2.5 px-4 font-medium text-right">Balance</th>
-                    <th className="py-2.5 px-4 font-medium">Details</th>
+                    <th className="py-2.5 px-4 font-medium text-right">Before → After</th>
+                    <th className="py-2.5 px-4 font-medium">Details &amp; Actor</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
@@ -553,10 +571,17 @@ export function LeavesView() {
                       >
                         {entry.amount > 0 ? `+${entry.amount}` : entry.amount}
                       </td>
-                      <td className="py-2.5 px-4 text-right font-mono tabular-nums">
-                        {typeof entry.balanceAfter === 'number' ? entry.balanceAfter : '—'}
+                      <td className="py-2.5 px-4 text-right font-mono tabular-nums whitespace-nowrap">
+                        {typeof entry.balanceBefore === 'number' && typeof entry.balanceAfter === 'number'
+                          ? `${entry.balanceBefore} → ${entry.balanceAfter}`
+                          : typeof entry.balanceAfter === 'number'
+                          ? entry.balanceAfter
+                          : '—'}
                       </td>
-                      <td className="py-2.5 px-4 text-zinc-600 dark:text-zinc-400">{entry.reason}</td>
+                      <td className="py-2.5 px-4 text-zinc-600 dark:text-zinc-400">
+                        <div>{entry.reason}</div>
+                        <div className="text-[10px] text-zinc-500">By {entry.createdByName}</div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -936,7 +961,9 @@ export function LeavesView() {
                                 onClick={() => {
                                   setAdjustTarget(emp);
                                   setAdjustLeaveType('SL');
+                                  setAdjustMode('delta');
                                   setAdjustDelta(1);
+                                  setAdjustExactTarget(emp.sickLeaveBalance);
                                   setAdjustCfDelta(0);
                                   setAdjustReason('');
                                 }}
@@ -1004,7 +1031,7 @@ export function LeavesView() {
                       <th className="py-2.5 px-4 font-medium">Type</th>
                       <th className="py-2.5 px-4 font-medium">Event</th>
                       <th className="py-2.5 px-4 font-medium text-right">Change</th>
-                      <th className="py-2.5 px-4 font-medium text-right">Bal After</th>
+                      <th className="py-2.5 px-4 font-medium text-right">Before → After</th>
                       <th className="py-2.5 px-4 font-medium">Reason &amp; Actor</th>
                     </tr>
                   </thead>
@@ -1022,8 +1049,12 @@ export function LeavesView() {
                         >
                           {entry.amount > 0 ? `+${entry.amount}` : entry.amount}
                         </td>
-                        <td className="py-2.5 px-4 text-right font-mono tabular-nums">
-                          {typeof entry.balanceAfter === 'number' ? entry.balanceAfter : '—'}
+                        <td className="py-2.5 px-4 text-right font-mono tabular-nums whitespace-nowrap">
+                          {typeof entry.balanceBefore === 'number' && typeof entry.balanceAfter === 'number'
+                            ? `${entry.balanceBefore} → ${entry.balanceAfter}`
+                            : typeof entry.balanceAfter === 'number'
+                            ? entry.balanceAfter
+                            : '—'}
                         </td>
                         <td className="py-2.5 px-4">
                           <div className="text-zinc-700 dark:text-zinc-300">{entry.reason}</div>
@@ -1098,8 +1129,19 @@ export function LeavesView() {
                 </div>
               </div>
 
-              <div className="text-xs font-mono tabular-nums text-zinc-600 dark:text-zinc-300">
-                Total duration: {computedDays} {computedDays === 1 ? 'day' : 'days'}
+              <div className="text-xs font-mono tabular-nums text-zinc-600 dark:text-zinc-300 flex flex-wrap items-center justify-between gap-2">
+                <span>
+                  Duration: {computedDays} {computedDays === 1 ? 'day' : 'days'}
+                </span>
+                {(leaveType === 'SL' || leaveType === 'CL') && (
+                  <span>
+                    Balance: {leaveType === 'SL' ? employee.sickLeaveBalance : employee.casualLeaveBalance}d → After approval:{' '}
+                    {round2(
+                      (leaveType === 'SL' ? employee.sickLeaveBalance : employee.casualLeaveBalance) - computedDays
+                    )}
+                    d
+                  </span>
+                )}
               </div>
 
               {clNotYetEligibleWarning && (
@@ -1187,7 +1229,13 @@ export function LeavesView() {
                 <label className="block font-medium mb-1">Leave Type</label>
                 <select
                   value={adjustLeaveType}
-                  onChange={(e) => setAdjustLeaveType(e.target.value as 'SL' | 'CL')}
+                  onChange={(e) => {
+                    const nextType = e.target.value as 'SL' | 'CL';
+                    setAdjustLeaveType(nextType);
+                    setAdjustExactTarget(
+                      nextType === 'SL' ? adjustTarget.sickLeaveBalance : adjustTarget.casualLeaveBalance
+                    );
+                  }}
                   className="w-full min-h-[42px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
                 >
                   <option value="SL">Sick Leave (SL) — Current: {adjustTarget.sickLeaveBalance}d</option>
@@ -1195,18 +1243,72 @@ export function LeavesView() {
                 </select>
               </div>
 
+              <div className="flex items-center gap-1 p-1 rounded-xl bg-zinc-100 dark:bg-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => setAdjustMode('delta')}
+                  className={`flex-1 py-1.5 rounded-lg text-xs font-medium ${
+                    adjustMode === 'delta'
+                      ? 'bg-white dark:bg-zinc-900 text-zinc-950 dark:text-zinc-100 shadow-sm'
+                      : 'text-zinc-600 dark:text-zinc-400'
+                  }`}
+                >
+                  Adjust (+/-)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAdjustMode('set');
+                    setAdjustExactTarget(
+                      adjustLeaveType === 'SL'
+                        ? adjustTarget.sickLeaveBalance
+                        : adjustTarget.casualLeaveBalance
+                    );
+                  }}
+                  className={`flex-1 py-1.5 rounded-lg text-xs font-medium ${
+                    adjustMode === 'set'
+                      ? 'bg-white dark:bg-zinc-900 text-zinc-950 dark:text-zinc-100 shadow-sm'
+                      : 'text-zinc-600 dark:text-zinc-400'
+                  }`}
+                >
+                  Set Exact Balance
+                </button>
+              </div>
+
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-medium mb-1">Adjustment (+/- days)</label>
-                  <input
-                    type="number"
-                    step="0.5"
-                    required
-                    value={adjustDelta}
-                    onChange={(e) => setAdjustDelta(Number(e.target.value))}
-                    className="w-full min-h-[42px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
-                  />
-                </div>
+                {adjustMode === 'delta' ? (
+                  <div>
+                    <label className="block font-medium mb-1">Adjustment (+/- days)</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      required
+                      value={adjustDelta}
+                      onChange={(e) => {
+                        const val = e.target.value === '' ? 0 : Number(e.target.value);
+                        setAdjustDelta(Number.isFinite(val) ? val : 0);
+                      }}
+                      className="w-full min-h-[42px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                    />
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block font-medium mb-1">Target Balance (days)</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min={-60}
+                      max={365}
+                      required
+                      value={adjustExactTarget}
+                      onChange={(e) => {
+                        const val = e.target.value === '' ? 0 : Number(e.target.value);
+                        setAdjustExactTarget(Number.isFinite(val) ? val : 0);
+                      }}
+                      className="w-full min-h-[42px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                    />
+                  </div>
+                )}
                 {adjustLeaveType === 'CL' && (
                   <div>
                     <label className="block font-medium mb-1">Carry-Fwd Delta (optional)</label>
@@ -1214,21 +1316,35 @@ export function LeavesView() {
                       type="number"
                       step="0.5"
                       value={adjustCfDelta}
-                      onChange={(e) => setAdjustCfDelta(Number(e.target.value))}
+                      onChange={(e) => {
+                        const val = e.target.value === '' ? 0 : Number(e.target.value);
+                        setAdjustCfDelta(Number.isFinite(val) ? val : 0);
+                      }}
                       className="w-full min-h-[42px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                     />
                   </div>
                 )}
               </div>
 
-              <div className="p-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 font-mono tabular-nums">
-                New {adjustLeaveType} Balance:{' '}
-                <span className="font-bold">
-                  {(adjustLeaveType === 'SL' ? adjustTarget.sickLeaveBalance : adjustTarget.casualLeaveBalance) +
-                    Number(adjustDelta || 0)}
-                </span>{' '}
-                days
-              </div>
+              {(() => {
+                const currentBal =
+                  adjustLeaveType === 'SL' ? adjustTarget.sickLeaveBalance : adjustTarget.casualLeaveBalance;
+                const nextBal =
+                  adjustMode === 'set'
+                    ? round2(adjustExactTarget)
+                    : round2(currentBal + Number(adjustDelta || 0));
+                const effDelta = round2(nextBal - currentBal);
+                return (
+                  <div className="p-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 font-mono tabular-nums flex items-center justify-between">
+                    <span>
+                      Change: {effDelta > 0 ? `+${effDelta}` : effDelta}d
+                    </span>
+                    <span>
+                      New {adjustLeaveType}: <span className="font-bold">{nextBal}d</span>
+                    </span>
+                  </div>
+                );
+              })()}
 
               <div>
                 <label className="block font-medium mb-1">Mandatory Reason (Audit Logged)</label>
@@ -1254,7 +1370,19 @@ export function LeavesView() {
               </button>
               <button
                 type="submit"
-                disabled={adjusting || !adjustReason.trim() || (adjustDelta === 0 && adjustCfDelta === 0)}
+                disabled={
+                  adjusting ||
+                  !adjustReason.trim() ||
+                  ((adjustMode === 'delta'
+                    ? adjustDelta === 0
+                    : round2(
+                        adjustExactTarget -
+                          (adjustLeaveType === 'SL'
+                            ? adjustTarget.sickLeaveBalance
+                            : adjustTarget.casualLeaveBalance)
+                      ) === 0) &&
+                    adjustCfDelta === 0)
+                }
                 className="flex-1 min-h-[44px] rounded-xl bg-[#B5121B] hover:bg-[#960E16] text-white text-xs font-semibold disabled:opacity-50"
               >
                 {adjusting ? 'Saving...' : 'Apply Adjustment'}

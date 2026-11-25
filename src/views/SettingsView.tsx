@@ -461,7 +461,13 @@ export function SettingsView() {
                 min={0}
                 max={180}
                 value={form.gracePeriodMinutes}
-                onChange={(e) => setForm({ ...form, gracePeriodMinutes: Number(e.target.value) })}
+                onChange={(e) => {
+                  const v = e.target.value === '' ? 0 : Number(e.target.value);
+                  setForm({
+                    ...form,
+                    gracePeriodMinutes: Number.isFinite(v) ? Math.max(0, Math.min(180, v)) : 0,
+                  });
+                }}
                 className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
               />
             </div>
@@ -472,9 +478,17 @@ export function SettingsView() {
               <label className="block font-medium mb-1">Half-Day Min Hours</label>
               <input
                 type="number"
+                min={0.5}
+                max={16}
                 step="0.5"
                 value={form.halfDayMinHours}
-                onChange={(e) => setForm({ ...form, halfDayMinHours: Number(e.target.value) })}
+                onChange={(e) => {
+                  const v = e.target.value === '' ? 0 : Number(e.target.value);
+                  setForm({
+                    ...form,
+                    halfDayMinHours: Number.isFinite(v) ? Math.max(0, Math.min(16, v)) : 0,
+                  });
+                }}
                 className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
               />
             </div>
@@ -482,9 +496,17 @@ export function SettingsView() {
               <label className="block font-medium mb-1">Full-Day Min Hours</label>
               <input
                 type="number"
+                min={1}
+                max={24}
                 step="0.5"
                 value={form.fullDayMinHours}
-                onChange={(e) => setForm({ ...form, fullDayMinHours: Number(e.target.value) })}
+                onChange={(e) => {
+                  const v = e.target.value === '' ? 0 : Number(e.target.value);
+                  setForm({
+                    ...form,
+                    fullDayMinHours: Number.isFinite(v) ? Math.max(0, Math.min(24, v)) : 0,
+                  });
+                }}
                 className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
               />
             </div>
@@ -492,8 +514,16 @@ export function SettingsView() {
               <label className="block font-medium mb-1">Default Sick Leave</label>
               <input
                 type="number"
+                min={0}
+                max={60}
                 value={form.defaultSickLeave}
-                onChange={(e) => setForm({ ...form, defaultSickLeave: Number(e.target.value) })}
+                onChange={(e) => {
+                  const v = e.target.value === '' ? 0 : Number(e.target.value);
+                  setForm({
+                    ...form,
+                    defaultSickLeave: Number.isFinite(v) ? Math.max(0, Math.min(60, v)) : 0,
+                  });
+                }}
                 className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
               />
             </div>
@@ -501,8 +531,16 @@ export function SettingsView() {
               <label className="block font-medium mb-1">Default Casual Leave</label>
               <input
                 type="number"
+                min={0}
+                max={60}
                 value={form.defaultCasualLeave}
-                onChange={(e) => setForm({ ...form, defaultCasualLeave: Number(e.target.value) })}
+                onChange={(e) => {
+                  const v = e.target.value === '' ? 0 : Number(e.target.value);
+                  setForm({
+                    ...form,
+                    defaultCasualLeave: Number.isFinite(v) ? Math.max(0, Math.min(60, v)) : 0,
+                  });
+                }}
                 className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
               />
             </div>
@@ -624,17 +662,25 @@ export function SettingsView() {
                         max={10}
                         step="0.5"
                         value={policy.sickLeaveMonthlyRate}
-                        onChange={(e) => updatePolicy({ sickLeaveMonthlyRate: Number(e.target.value) })}
+                        onChange={(e) => {
+                          const v = e.target.value === '' ? 0 : Number(e.target.value);
+                          updatePolicy({ sickLeaveMonthlyRate: Number.isFinite(v) ? Math.max(0, v) : 0 });
+                        }}
                         className="w-full min-h-[38px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
                       />
                     </div>
-                    <label className="flex items-center justify-between gap-2 cursor-pointer">
-                      <span>Allow SL Carry-Forward</span>
+                    <label className="flex items-start justify-between gap-2 cursor-pointer">
+                      <span>
+                        <span className="block">Allow SL Carry-Forward (Month-to-Month &amp; Year-End)</span>
+                        <span className="block text-[10px] text-zinc-500">
+                          When unchecked, unused monthly SL expires at the start of the next month.
+                        </span>
+                      </span>
                       <input
                         type="checkbox"
                         checked={policy.sickLeaveCarryForward}
                         onChange={(e) => updatePolicy({ sickLeaveCarryForward: e.target.checked })}
-                        className="w-4 h-4 accent-[#B5121B]"
+                        className="w-4 h-4 mt-0.5 accent-[#B5121B]"
                       />
                     </label>
                     <label className="flex items-center justify-between gap-2 cursor-pointer">
@@ -660,7 +706,10 @@ export function SettingsView() {
                           max={10}
                           step="0.5"
                           value={policy.casualLeaveMonthlyRate}
-                          onChange={(e) => updatePolicy({ casualLeaveMonthlyRate: Number(e.target.value) })}
+                          onChange={(e) => {
+                            const v = e.target.value === '' ? 0 : Number(e.target.value);
+                            updatePolicy({ casualLeaveMonthlyRate: Number.isFinite(v) ? Math.max(0, v) : 0 });
+                          }}
                           className="w-full min-h-[38px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
                         />
                       </div>
@@ -672,9 +721,12 @@ export function SettingsView() {
                           max={36}
                           step="1"
                           value={policy.casualLeaveEligibilityMonths}
-                          onChange={(e) =>
-                            updatePolicy({ casualLeaveEligibilityMonths: Math.max(0, Math.floor(Number(e.target.value))) })
-                          }
+                          onChange={(e) => {
+                            const v = e.target.value === '' ? 0 : Number(e.target.value);
+                            updatePolicy({
+                              casualLeaveEligibilityMonths: Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0,
+                            });
+                          }}
                           className="w-full min-h-[38px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
                         />
                       </div>
@@ -696,7 +748,10 @@ export function SettingsView() {
                           min={0}
                           max={120}
                           value={policy.casualLeaveMaxCarryForward ?? 0}
-                          onChange={(e) => updatePolicy({ casualLeaveMaxCarryForward: Math.max(0, Number(e.target.value)) })}
+                          onChange={(e) => {
+                            const v = e.target.value === '' ? 0 : Number(e.target.value);
+                            updatePolicy({ casualLeaveMaxCarryForward: Number.isFinite(v) ? Math.max(0, v) : 0 });
+                          }}
                           className="w-full min-h-[38px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
                         />
                       </div>
@@ -707,9 +762,12 @@ export function SettingsView() {
                           min={0}
                           max={120}
                           value={policy.casualLeaveExpiryMonths ?? 0}
-                          onChange={(e) =>
-                            updatePolicy({ casualLeaveExpiryMonths: Math.max(0, Math.floor(Number(e.target.value))) })
-                          }
+                          onChange={(e) => {
+                            const v = e.target.value === '' ? 0 : Number(e.target.value);
+                            updatePolicy({
+                              casualLeaveExpiryMonths: Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0,
+                            });
+                          }}
                           className="w-full min-h-[38px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
                         />
                       </div>

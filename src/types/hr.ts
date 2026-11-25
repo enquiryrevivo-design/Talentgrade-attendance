@@ -150,9 +150,11 @@ export interface Employee {
   casualLeaveBalance: number;
   carryForwardBalance: number;
   leavePolicyMigrated?: boolean;
+  leaveBaselineMonth?: string; // YYYY-MM
   leaveLastSyncedMonth?: string; // YYYY-MM
   leaveLastResetYear?: number;
   clEligibilityDate?: string;    // YYYY-MM-DD
+  clEligibilityCustom?: boolean;
   leaveMigrationNote?: string;
   reminderPreferences?: EmployeeReminderPreferences;
   mustChangePassword: boolean;
