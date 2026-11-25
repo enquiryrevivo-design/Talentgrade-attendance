@@ -11,7 +11,33 @@ function getApp(): Express {
   return cachedApp;
 }
 
+function restoreRewrittenApiUrl(req: IncomingMessage) {
+  const rawUrl = req.url || '/api';
+  const parsed = new URL(rawUrl, 'https://talentgrade.local');
+  const rewritePath = parsed.searchParams.get('__path');
+
+  if (rewritePath && rewritePath.startsWith('/api')) {
+    parsed.searchParams.delete('__path');
+    const remainingQuery = parsed.searchParams.toString();
+    const cleanPath = rewritePath.replace(/^\/+/, '/');
+    req.url = remainingQuery ? `${cleanPath}?${remainingQuery}` : cleanPath;
+    return;
+  }
+
+  const originalHeader = req.headers['x-vercel-original-url'];
+  const originalUrl = Array.isArray(originalHeader) ? originalHeader[0] : originalHeader;
+  if (
+    typeof originalUrl === 'string' &&
+    originalUrl.startsWith('/api/') &&
+    !originalUrl.startsWith('/api/index') &&
+    (parsed.pathname === '/api/index' || parsed.pathname === '/api')
+  ) {
+    req.url = originalUrl;
+  }
+}
+
 export default function handler(req: IncomingMessage, res: ServerResponse) {
+  restoreRewrittenApiUrl(req);
   const app = getApp();
   return app(req as Parameters<Express>[0], res as Parameters<Express>[1]);
 }
