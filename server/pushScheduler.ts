@@ -85,11 +85,24 @@ export class SmartAttendanceReminderService {
   private transport: PushTransportFn;
 
   constructor(options?: { dataDir?: string; transport?: PushTransportFn }) {
-    this.dataDir = options?.dataDir || path.resolve(process.cwd(), '.data');
+    const preferredDir =
+      options?.dataDir ||
+      (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME
+        ? path.join('/tmp', 'talentgrade-data')
+        : path.resolve(process.cwd(), '.data'));
+
+    let resolvedDir = preferredDir;
+    try {
+      fs.mkdirSync(resolvedDir, { recursive: true });
+    } catch {
+      resolvedDir = path.join('/tmp', 'talentgrade-data');
+      fs.mkdirSync(resolvedDir, { recursive: true });
+    }
+
+    this.dataDir = resolvedDir;
     this.vapidFile = path.join(this.dataDir, 'vapid.json');
     this.stateFile = path.join(this.dataDir, 'reminder-state.json');
 
-    fs.mkdirSync(this.dataDir, { recursive: true });
     this.vapidKeys = this.loadOrCreateVapidKeys();
     webPush.setVapidDetails(
       this.vapidKeys.subject,
