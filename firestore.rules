@@ -720,8 +720,11 @@ service cloud.firestore {
     match /attendanceRecords/{recordId} {
       allow get: if isSignedIn() && isValidId(recordId) && (
         isSuperAdmin() ||
-        existing().employeeUid == request.auth.uid ||
-        (isTeamLeader() && (existing().managerUid == request.auth.uid || hasLeaderPermission('canViewAllEmployees')))
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && (
+          existing().employeeUid == request.auth.uid ||
+          (isTeamLeader() && (existing().managerUid == request.auth.uid || hasLeaderPermission('canViewAllEmployees')))
+        ))
       );
       allow list: if isSignedIn() && (
         isBootstrappedAdmin() ||
@@ -741,14 +744,20 @@ service cloud.firestore {
         hasLeaderPermission('canEditAttendance') ||
         hasLeaderPermission('canApproveCorrections') ||
         (isActiveEmployee() && existing().employeeUid == request.auth.uid &&
-          (!( 'punchOutTime' in existing() ) || existing().punchOutTime == '') &&
           incoming().employeeUid == existing().employeeUid &&
           incoming().employeeId == existing().employeeId &&
-          incoming().date == existing().date &&
-          incoming().diff(existing()).affectedKeys().hasOnly([
-            'punchOutTime', 'punchOutLat', 'punchOutLng', 'punchOutAccuracy',
-            'punchOutPhotoId', 'workingMinutes', 'status', 'updatedAt'
-          ]))
+          incoming().date == existing().date && (
+          ((!( 'punchInTime' in existing() ) || existing().punchInTime == '') &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'timezone', 'punchInTime', 'punchInLat', 'punchInLng', 'punchInAccuracy',
+              'punchInPhotoId', 'workingMinutes', 'status', 'isLate', 'lateByMinutes', 'updatedAt'
+            ])) ||
+          ((!( 'punchOutTime' in existing() ) || existing().punchOutTime == '') &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'punchOutTime', 'punchOutLat', 'punchOutLng', 'punchOutAccuracy',
+              'punchOutPhotoId', 'workingMinutes', 'status', 'updatedAt'
+            ]))
+        ))
       );
       allow delete: if isSuperAdmin() && isValidId(recordId);
     }
