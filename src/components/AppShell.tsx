@@ -88,9 +88,6 @@ export function AppShell({ activePage, onNavigate, children }: AppShellProps) {
       <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:fixed lg:inset-y-0 bg-white dark:bg-zinc-900 border-r border-zinc-200 dark:border-zinc-800 z-30">
         <div className="px-5 py-5 border-b border-zinc-200 dark:border-zinc-800">
           <TalentGradeLogo logoUrl={companyLogoUrl} companyName={companyName} />
-          <div className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-1.5 pl-0.5 truncate">
-            {employee.location || 'India'} · Internal Operations
-          </div>
         </div>
 
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
