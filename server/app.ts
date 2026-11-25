@@ -4,8 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { initializeApp, getApps, getApp } from 'firebase-admin/app';
-import { getAuth, DecodedIdToken } from 'firebase-admin/auth';
-import { renderPayslipPdfBuffer } from './payslipPdf.js';
+import { getAuth, DecodedIdToken, Auth } from 'firebase-admin/auth';
 import {
   computeEmployeeLeaveAccrualPlan,
   EngineApprovedLeaveInput,
@@ -27,32 +26,41 @@ import {
 import { SmartAttendanceReminderService } from './pushScheduler.js';
 
 const BOOTSTRAPPED_ADMIN_EMAIL = 'enquiry.revivo@gmail.com';
+const FALLBACK_FIREBASE_PROJECT_ID = 'gen-lang-client-0264117228';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-function loadFirebaseConfig(): { projectId: string } {
+function resolveFirebaseProjectId(): string {
+  const envProjectId = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || '').trim();
+  if (envProjectId) return envProjectId;
+
   const candidates = [
     path.resolve(process.cwd(), 'firebase-applet-config.json'),
     path.resolve(__dirname, '..', 'firebase-applet-config.json'),
   ];
   for (const filePath of candidates) {
-    if (fs.existsSync(filePath)) {
-      return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as { projectId: string };
+    try {
+      if (fs.existsSync(filePath)) {
+        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as { projectId?: string };
+        if (parsed.projectId) return parsed.projectId;
+      }
+    } catch {
+      // Fall through to next candidate / fallback
     }
   }
-  if (process.env.FIREBASE_PROJECT_ID) {
-    return { projectId: process.env.FIREBASE_PROJECT_ID };
-  }
-  throw new Error('firebase-applet-config.json not found');
+  return FALLBACK_FIREBASE_PROJECT_ID;
 }
 
-const firebaseConfig = loadFirebaseConfig();
-
-// Initialize Firebase Admin ONLY for ID token verification (works on Starter Tier without IAM)
-const adminApp = getApps().length
-  ? getApp()
-  : initializeApp({ projectId: firebaseConfig.projectId });
-const adminAuth = getAuth(adminApp);
+let cachedAdminAuth: Auth | null = null;
+function getAdminAuth(): Auth {
+  if (cachedAdminAuth) return cachedAdminAuth;
+  // Initialize Firebase Admin ONLY for ID token verification (works on Starter Tier without IAM)
+  const adminApp = getApps().length
+    ? getApp()
+    : initializeApp({ projectId: resolveFirebaseProjectId() });
+  cachedAdminAuth = getAuth(adminApp);
+  return cachedAdminAuth;
+}
 
 interface AuthenticatedRequest extends Request {
   authUser?: DecodedIdToken;
@@ -65,7 +73,7 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
   }
   const token = header.slice('Bearer '.length).trim();
   try {
-    const decoded = await adminAuth.verifyIdToken(token);
+    const decoded = await getAdminAuth().verifyIdToken(token);
     if (!decoded.email_verified) {
       return res.status(403).json({ error: 'Forbidden: Email verification required' });
     }
@@ -118,7 +126,13 @@ function resolveTimezoneParts(date: Date, timeZone: string): {
 
 export function createApiApp() {
   const app = express();
-  const reminderService = new SmartAttendanceReminderService();
+  let reminderServiceInstance: SmartAttendanceReminderService | null = null;
+  const getReminderService = () => {
+    if (!reminderServiceInstance) {
+      reminderServiceInstance = new SmartAttendanceReminderService();
+    }
+    return reminderServiceInstance;
+  };
 
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '2mb' }));
@@ -335,6 +349,7 @@ export function createApiApp() {
         return res.status(400).json({ error: 'Invalid payslip payload' });
       }
 
+      const { renderPayslipPdfBuffer } = await import('./payslipPdf.js');
       const pdfBuffer = await renderPayslipPdfBuffer({ payslip, company, logoDataUrl });
       const safeCode = String(payslip.employeeCode || 'EMP').replace(/[^a-zA-Z0-9_-]/g, '');
       const safeMonth = String(payslip.month || 'month').replace(/[^0-9-]/g, '');
@@ -353,7 +368,7 @@ export function createApiApp() {
   const isVerifiedSuperAdmin = (authUser?: DecodedIdToken): boolean => {
     if (!authUser) return false;
     if ((authUser.email || '').toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL) return true;
-    const snap = reminderService.getStateSnapshot();
+    const snap = getReminderService().getStateSnapshot();
     return Object.values(snap.employees).some(
       (e) => e.uid === authUser.uid && e.role === 'super_admin' && e.status === 'Active'
     );
@@ -361,7 +376,7 @@ export function createApiApp() {
 
   // Expose ONLY the VAPID public key to authenticated users (private key stays strictly server-side)
   app.get('/api/push/vapid-public-key', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
-    res.json({ publicKey: reminderService.getPublicVapidKey() });
+    res.json({ publicKey: getReminderService().getPublicVapidKey() });
   });
 
   // Register or refresh a Web Push subscription for the authenticated employee
@@ -385,7 +400,7 @@ export function createApiApp() {
       const safeEmpId =
         typeof employeeId === 'string' && employeeId.trim() ? employeeId.trim().slice(0, 128) : uid;
 
-      const record = reminderService.registerSubscription({
+      const record = getReminderService().registerSubscription({
         employeeId: safeEmpId,
         employeeUid: uid,
         endpoint,
@@ -420,7 +435,7 @@ export function createApiApp() {
       if (!uid) return res.status(401).json({ error: 'Unauthorized' });
 
       const { endpoint, subscriptionId, disableAllForUser } = req.body || {};
-      const deactivated = reminderService.deactivateSubscription({
+      const deactivated = getReminderService().deactivateSubscription({
         employeeUid: uid,
         endpoint: typeof endpoint === 'string' ? endpoint : undefined,
         subscriptionId: typeof subscriptionId === 'string' ? subscriptionId : undefined,
@@ -441,8 +456,9 @@ export function createApiApp() {
 
       const callerIsAdmin = isVerifiedSuperAdmin(req.authUser);
       const { company, employees, attendanceRecords, approvedLeaves } = req.body || {};
+      const service = getReminderService();
 
-      reminderService.syncClientSnapshot({
+      service.syncClientSnapshot({
         callerUid: uid,
         callerIsAdmin,
         company: callerIsAdmin && company && typeof company === 'object' ? company : undefined,
@@ -451,7 +467,7 @@ export function createApiApp() {
         approvedLeaves: Array.isArray(approvedLeaves) ? approvedLeaves : undefined,
       });
 
-      const userSubs = reminderService.getSubscriptionsForUser(uid).map((s) => ({
+      const userSubs = service.getSubscriptionsForUser(uid).map((s) => ({
         id: s.id,
         endpoint: s.endpoint,
         deviceLabel: s.deviceLabel,
@@ -463,7 +479,7 @@ export function createApiApp() {
       res.json({
         ok: true,
         subscriptions: userSubs,
-        overview: callerIsAdmin ? reminderService.getOverviewMetrics() : undefined,
+        overview: callerIsAdmin ? service.getOverviewMetrics() : undefined,
       });
     } catch (err) {
       console.error('Error syncing reminder state:', err);
@@ -481,7 +497,7 @@ export function createApiApp() {
       const safeEmpId =
         typeof employeeId === 'string' && employeeId.trim() ? employeeId.trim().slice(0, 128) : uid;
 
-      const updated = reminderService.updateEmployeePreferences({
+      const updated = getReminderService().updateEmployeePreferences({
         employeeId: safeEmpId,
         employeeUid: uid,
         preferences: preferences && typeof preferences === 'object' ? preferences : {},
@@ -502,14 +518,15 @@ export function createApiApp() {
       const callerIsAdmin = isVerifiedSuperAdmin(req.authUser);
       const scope = req.query.scope === 'all' && callerIsAdmin ? 'all' : 'self';
       const limitCount = Number(req.query.limit || 150);
+      const service = getReminderService();
 
-      const logs = reminderService.getHistory({
+      const logs = service.getHistory({
         callerUid: uid,
         callerIsAdmin: scope === 'all',
         limitCount: Number.isFinite(limitCount) ? limitCount : 150,
       });
 
-      const subscriptions = reminderService.getSubscriptionsForUser(uid).map((s) => ({
+      const subscriptions = service.getSubscriptionsForUser(uid).map((s) => ({
         id: s.id,
         endpoint: s.endpoint,
         deviceLabel: s.deviceLabel,
@@ -521,7 +538,7 @@ export function createApiApp() {
       res.json({
         logs,
         subscriptions,
-        overview: callerIsAdmin ? reminderService.getOverviewMetrics() : undefined,
+        overview: callerIsAdmin ? service.getOverviewMetrics() : undefined,
       });
     } catch (err) {
       console.error('Error fetching reminder history:', err);
@@ -535,7 +552,7 @@ export function createApiApp() {
       const uid = req.authUser?.uid;
       if (!uid) return res.status(401).json({ error: 'Unauthorized' });
 
-      const result = await reminderService.sendTestNotification(uid);
+      const result = await getReminderService().sendTestNotification(uid);
       res.json({ ok: true, ...result });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Test push notification failed';
@@ -549,11 +566,12 @@ export function createApiApp() {
       return res.status(403).json({ error: 'Forbidden: Super Admin access required' });
     }
     try {
-      const result = await reminderService.processDueAttendanceReminders(new Date());
+      const service = getReminderService();
+      const result = await service.processDueAttendanceReminders(new Date());
       res.json({
         ok: true,
         ...result,
-        overview: reminderService.getOverviewMetrics(),
+        overview: service.getOverviewMetrics(),
       });
     } catch (err) {
       console.error('Error executing manual reminder run:', err);
@@ -561,5 +579,5 @@ export function createApiApp() {
     }
   });
 
-  return { app, reminderService };
+  return { app, getReminderService };
 }

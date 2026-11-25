@@ -4,7 +4,7 @@
   "outputDirectory": "dist",
   "functions": {
     "api/**/*.ts": {
-      "includeFiles": "{fonts/**,firebase-applet-config.json,server/**,shared/**}"
+      "includeFiles": "fonts/**"
     }
   },
   "rewrites": [

@@ -8,12 +8,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 async function startServer() {
-  const { app, reminderService } = createApiApp();
+  const { app, getReminderService } = createApiApp();
   const httpServer = http.createServer(app);
   const PORT = 3000;
 
   // Start background Smart Attendance Reminders scheduler (runs continuously even when portal tabs are closed)
-  reminderService.startScheduler(30_000);
+  getReminderService().startScheduler(30_000);
 
   // Vite middleware in development, static dist in production
   if (process.env.NODE_ENV !== 'production') {
