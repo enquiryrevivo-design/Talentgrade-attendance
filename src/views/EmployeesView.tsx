@@ -10,6 +10,8 @@ import {
   RefreshCw,
   Upload,
   SlidersHorizontal,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../components/Toast';
@@ -25,8 +27,10 @@ import {
 } from '../types/hr';
 import {
   adjustEmployeeLeaveBalance,
+  BOOTSTRAPPED_ADMIN_EMAIL,
   compressImageFile,
   createEmployeeAccount,
+  deleteEmployeeAccount,
   fetchAllEmployees,
   fetchAttendanceRecords,
   fetchEmployeeSalary,
@@ -156,6 +160,11 @@ export function EmployeesView() {
     professionalTax: 0,
     defaultBonus: 0,
   });
+
+  // Delete Employee Confirmation Modal
+  const [deleteTarget, setDeleteTarget] = useState<Employee | null>(null);
+  const [deleteRelatedRecords, setDeleteRelatedRecords] = useState(false);
+  const [deletingEmp, setDeletingEmp] = useState(false);
 
   const loadData = useCallback(async () => {
     if (!employee) return;
@@ -576,6 +585,45 @@ export function EmployeesView() {
     }
   };
 
+  const canDeleteEmployee = (target: Employee) =>
+    isSuperAdmin &&
+    target.id !== employee.id &&
+    target.uid !== employee.uid &&
+    target.email.trim().toLowerCase() !== BOOTSTRAPPED_ADMIN_EMAIL;
+
+  const openDeleteModal = (target: Employee) => {
+    if (!canDeleteEmployee(target)) return;
+    setDeleteRelatedRecords(false);
+    setDeleteTarget(target);
+  };
+
+  const handleConfirmDeleteEmployee = async () => {
+    if (!deleteTarget || !canDeleteEmployee(deleteTarget)) return;
+    setDeletingEmp(true);
+    try {
+      const res = await deleteEmployeeAccount(deleteTarget, employee, {
+        deleteRelatedRecords,
+      });
+      showToast(
+        deleteRelatedRecords
+          ? `Deleted ${deleteTarget.fullName} and ${res.deletedRelatedCount} related record(s).`
+          : `Deleted ${deleteTarget.fullName} (${deleteTarget.employeeCode}) from the directory.`,
+        'success'
+      );
+      if (selectedEmp?.id === deleteTarget.id) {
+        setSelectedEmp(null);
+      }
+      setDeleteTarget(null);
+      setDeleteRelatedRecords(false);
+      await loadData();
+      await refreshCelebrations();
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Could not delete employee', 'error');
+    } finally {
+      setDeletingEmp(false);
+    }
+  };
+
   const handleSaveQuickSalary = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedEmp || !isSuperAdmin) return;
@@ -825,10 +873,21 @@ export function EmployeesView() {
                               className="min-h-[34px] px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
                             >
                               {emp.status === 'Active' ? (
-                                <UserX className="w-3.5 h-3.5 text-[#B5121B]" />
+                                <UserX className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                               ) : (
                                 <UserCheck className="w-3.5 h-3.5 text-emerald-600" />
                               )}
+                            </button>
+                          )}
+                          {canDeleteEmployee(emp) && (
+                            <button
+                              type="button"
+                              onClick={() => openDeleteModal(emp)}
+                              title="Delete Employee"
+                              aria-label={`Delete ${emp.fullName}`}
+                              className="min-h-[34px] px-2.5 py-1.5 rounded-lg border border-red-200 dark:border-red-900/60 text-[#B5121B] dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 text-xs"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           )}
                         </div>
@@ -1836,14 +1895,26 @@ export function EmployeesView() {
 
                   {isSuperAdmin && (
                     <div className="flex flex-wrap items-center justify-between gap-3 pt-3">
-                      <button
-                        type="button"
-                        onClick={() => handleResetPassword(selectedEmp)}
-                        className="min-h-[42px] px-4 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 inline-flex items-center gap-2 font-medium"
-                      >
-                        <KeyRound className="w-4 h-4" />
-                        Send Password Reset
-                      </button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleResetPassword(selectedEmp)}
+                          className="min-h-[42px] px-4 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 inline-flex items-center gap-2 font-medium"
+                        >
+                          <KeyRound className="w-4 h-4" />
+                          Send Password Reset
+                        </button>
+                        {canDeleteEmployee(selectedEmp) && (
+                          <button
+                            type="button"
+                            onClick={() => openDeleteModal(selectedEmp)}
+                            className="min-h-[42px] px-4 py-2 rounded-xl border border-red-200 dark:border-red-900/70 text-[#B5121B] dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 inline-flex items-center gap-2 font-medium"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                            Delete Employee
+                          </button>
+                        )}
+                      </div>
                       <button
                         type="submit"
                         disabled={savingEdit}
@@ -2176,6 +2247,88 @@ export function EmployeesView() {
                   )}
                 </form>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Employee Confirmation Modal */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-[60] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-employee-title"
+            className="w-full max-w-md bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 shadow-2xl overflow-hidden"
+          >
+            <div className="px-5 py-4 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 text-[#B5121B] dark:text-red-400">
+                <AlertTriangle className="w-5 h-5 shrink-0" />
+                <h3 id="delete-employee-title" className="text-base font-semibold text-zinc-950 dark:text-zinc-100">
+                  Delete Employee Account
+                </h3>
+              </div>
+              <button
+                type="button"
+                disabled={deletingEmp}
+                onClick={() => setDeleteTarget(null)}
+                className="text-zinc-500 p-1 disabled:opacity-50"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs">
+              <div className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 space-y-1">
+                <div className="font-semibold text-sm text-zinc-950 dark:text-zinc-100">{deleteTarget.fullName}</div>
+                <div className="text-zinc-500">
+                  {deleteTarget.employeeCode} · {deleteTarget.email}
+                </div>
+                <div className="text-zinc-500">
+                  {deleteTarget.department} · {deleteTarget.designation}
+                </div>
+              </div>
+
+              <p className="text-zinc-600 dark:text-zinc-300 leading-relaxed">
+                This permanently removes the employee from the directory, revokes portal login access and role permissions, and deletes their salary configuration and celebration profile.
+              </p>
+
+              <label className="flex items-start gap-2.5 p-3 rounded-xl border border-red-200/80 dark:border-red-900/50 bg-red-50/60 dark:bg-red-950/20 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={deleteRelatedRecords}
+                  disabled={deletingEmp}
+                  onChange={(e) => setDeleteRelatedRecords(e.target.checked)}
+                  className="mt-0.5 accent-[#B5121B]"
+                />
+                <span className="text-zinc-700 dark:text-zinc-200 leading-relaxed">
+                  Also permanently delete all attendance records, selfies, correction requests, leave applications, and payroll records for this employee.
+                </span>
+              </label>
+
+              <p className="text-[11px] text-zinc-500">
+                Tip: If this employee left the company and you want to retain their profile for reporting, mark their status as Resigned or Inactive instead.
+              </p>
+            </div>
+
+            <div className="px-5 py-4 border-t border-zinc-200 dark:border-zinc-800 flex items-center justify-end gap-3">
+              <button
+                type="button"
+                disabled={deletingEmp}
+                onClick={() => setDeleteTarget(null)}
+                className="min-h-[42px] px-4 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 text-xs font-medium disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingEmp}
+                onClick={handleConfirmDeleteEmployee}
+                className="min-h-[42px] px-4 py-2 rounded-xl bg-[#B5121B] hover:bg-[#960E16] text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                {deletingEmp ? 'Deleting...' : 'Delete Permanently'}
+              </button>
             </div>
           </div>
         </div>

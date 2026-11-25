@@ -1385,6 +1385,135 @@ export async function completeFirstLoginPasswordChangeInApp(employee: Employee):
   }
 }
 
+export async function deleteEmployeeAccount(
+  targetEmployee: Employee,
+  actor: Employee,
+  options?: { deleteRelatedRecords?: boolean }
+): Promise<{ deletedRelatedCount: number }> {
+  if (actor.role !== 'super_admin') {
+    throw new Error('Only Super Admins can permanently delete employee accounts.');
+  }
+  if (!targetEmployee?.id) {
+    throw new Error('Invalid employee record.');
+  }
+  if (targetEmployee.id === actor.id || (targetEmployee.uid && targetEmployee.uid === actor.uid)) {
+    throw new Error('You cannot delete your own active Super Admin account.');
+  }
+  if (targetEmployee.email.trim().toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL) {
+    throw new Error('The primary bootstrapped Super Admin account cannot be deleted.');
+  }
+
+  const deleteRelatedRecords = Boolean(options?.deleteRelatedRecords);
+
+  try {
+    const refMap = new Map<string, ReturnType<typeof doc>>();
+    const enqueueRef = (ref: ReturnType<typeof doc>) => {
+      refMap.set(ref.path, ref);
+    };
+
+    // 1. Core directory, RBAC role, salary config, celebration profile, and profile photo
+    enqueueRef(doc(db, 'employees', targetEmployee.id));
+    if (targetEmployee.uid) {
+      enqueueRef(doc(db, 'roles', targetEmployee.uid));
+    }
+    enqueueRef(doc(db, 'celebrationProfiles', targetEmployee.id));
+    enqueueRef(doc(db, 'employeeSalaries', targetEmployee.id));
+    if (targetEmployee.profilePhotoAssetId) {
+      enqueueRef(doc(db, 'mediaAssets', targetEmployee.profilePhotoAssetId));
+    }
+
+    const celNotifSnap = await getDocs(
+      query(collection(db, 'celebrationNotifications'), where('employeeId', '==', targetEmployee.id))
+    ).catch(() => null);
+    celNotifSnap?.docs.forEach((d) => enqueueRef(d.ref));
+
+    // 2. Optional full purge of employee-owned historical attendance, leave, payroll, and notification records
+    let deletedRelatedCount = 0;
+    if (deleteRelatedRecords) {
+      const relatedCollections = [
+        'attendanceRecords',
+        'attendancePhotos',
+        'attendanceCorrections',
+        'leaveApplications',
+        'payrollRecords',
+        'attendanceReminderLogs',
+        'hrNotifications',
+      ] as const;
+
+      const snaps = await Promise.all(
+        relatedCollections.map((colName) =>
+          getDocs(query(collection(db, colName), where('employeeId', '==', targetEmployee.id))).catch(() => null)
+        )
+      );
+      for (const snap of snaps) {
+        if (!snap) continue;
+        snap.docs.forEach((d) => {
+          if (!refMap.has(d.ref.path)) {
+            deletedRelatedCount++;
+          }
+          enqueueRef(d.ref);
+        });
+      }
+
+      if (targetEmployee.uid) {
+        const uidNotifsSnap = await getDocs(
+          query(collection(db, 'hrNotifications'), where('targetUid', '==', targetEmployee.uid))
+        ).catch(() => null);
+        uidNotifsSnap?.docs.forEach((d) => {
+          if (!refMap.has(d.ref.path)) {
+            deletedRelatedCount++;
+          }
+          enqueueRef(d.ref);
+        });
+      }
+    }
+
+    // 3. Commit in Firestore batches (<= 400 writes per batch) so access & directory records are removed immediately
+    const allRefs = Array.from(refMap.values());
+    const CHUNK_SIZE = 400;
+    for (let i = 0; i < allRefs.length; i += CHUNK_SIZE) {
+      const batch = writeBatch(db);
+      const chunk = allRefs.slice(i, i + CHUNK_SIZE);
+      for (const ref of chunk) {
+        batch.delete(ref);
+      }
+      await batch.commit();
+    }
+
+    await writeAuditLog({
+      actor,
+      action: 'DELETE_EMPLOYEE',
+      entityType: 'Employee',
+      entityId: targetEmployee.id,
+      previousValues: {
+        employeeCode: targetEmployee.employeeCode,
+        fullName: targetEmployee.fullName,
+        email: targetEmployee.email,
+        role: targetEmployee.role,
+        department: targetEmployee.department,
+        status: targetEmployee.status,
+      },
+      updatedValues: {
+        deletedRelatedRecords: deleteRelatedRecords,
+        deletedRelatedCount,
+      },
+      summary: `Deleted employee ${targetEmployee.fullName} (${targetEmployee.employeeCode})${
+        deleteRelatedRecords ? ` and ${deletedRelatedCount} related record(s)` : ''
+      }`,
+    });
+
+    return { deletedRelatedCount };
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      (err.message.includes('Super Admin') || err.message.includes('Invalid employee'))
+    ) {
+      throw err;
+    }
+    handleFirestoreError(err, OperationType.DELETE, `employees/${targetEmployee.id}`);
+  }
+}
+
 export async function punchIn(params: {
   employee: Employee;
   settings: CompanySettings;
