@@ -603,17 +603,79 @@ export async function fetchServerTime(timezone = 'Asia/Kolkata'): Promise<{
   localDate: string;
   localHHmm: string;
   localMinutesOfDay: number;
+  clockOffsetMs: number;
 }> {
   const user = auth.currentUser;
   if (!user) throw new Error('Not authenticated');
-  const token = await user.getIdToken();
-  const res = await fetch(`/api/server-time?tz=${encodeURIComponent(timezone)}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) {
-    throw new Error('Could not synchronize server clock for attendance.');
+
+  const requestClock = async (forceRefresh: boolean) => {
+    const token = await user.getIdToken(forceRefresh);
+    return fetch(`/api/server-time?tz=${encodeURIComponent(timezone)}`, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+      },
+    });
+  };
+
+  let res = await requestClock(false);
+  if (res.status === 401) {
+    res = await requestClock(true);
   }
-  return res.json();
+
+  const contentType = res.headers.get('content-type') || '';
+  if (!res.ok) {
+    let serverDetail = '';
+    if (contentType.includes('application/json')) {
+      const errBody = await res.json().catch(() => null);
+      if (errBody && typeof errBody.error === 'string') {
+        serverDetail = errBody.error;
+      }
+    }
+    console.error('Server clock sync failed:', res.status, serverDetail);
+    throw new Error(
+      serverDetail
+        ? `Could not synchronize server clock for attendance (${res.status}: ${serverDetail}).`
+        : `Could not synchronize server clock for attendance (HTTP ${res.status}).`
+    );
+  }
+
+  if (!contentType.includes('application/json')) {
+    throw new Error('Could not synchronize server clock for attendance (unexpected server response).');
+  }
+
+  const data = (await res.json()) as {
+    iso?: unknown;
+    epochMs?: unknown;
+    timezone?: unknown;
+    localDate?: unknown;
+    localHHmm?: unknown;
+    localMinutesOfDay?: unknown;
+  };
+
+  if (
+    typeof data?.iso !== 'string' ||
+    typeof data?.epochMs !== 'number' ||
+    !Number.isFinite(data.epochMs) ||
+    typeof data?.localDate !== 'string' ||
+    typeof data?.localHHmm !== 'string' ||
+    typeof data?.localMinutesOfDay !== 'number' ||
+    !Number.isFinite(data.localMinutesOfDay)
+  ) {
+    throw new Error('Could not synchronize server clock for attendance (invalid timestamp payload).');
+  }
+
+  return {
+    iso: data.iso,
+    epochMs: data.epochMs,
+    timezone: typeof data.timezone === 'string' && data.timezone ? data.timezone : timezone,
+    localDate: data.localDate,
+    localHHmm: data.localHHmm,
+    localMinutesOfDay: data.localMinutesOfDay,
+    clockOffsetMs: data.epochMs - Date.now(),
+  };
 }
 
 export async function fetchAllEmployees(currentEmployee: Employee): Promise<Employee[]> {

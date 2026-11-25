@@ -2,7 +2,7 @@ import express, { Request, Response } from 'express';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createApiApp } from './server/app.ts';
+import { createApiApp } from './server/app.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

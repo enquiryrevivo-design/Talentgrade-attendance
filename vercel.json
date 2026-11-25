@@ -3,15 +3,11 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": {
-    "api/index.ts": {
-      "includeFiles": "{fonts/**,firebase-applet-config.json}"
+    "api/**/*.ts": {
+      "includeFiles": "{fonts/**,firebase-applet-config.json,server/**,shared/**}"
     }
   },
   "rewrites": [
-    {
-      "source": "/api/(.*)",
-      "destination": "/api/index.ts"
-    },
     {
       "source": "/((?!api/).*)",
       "destination": "/index.html"

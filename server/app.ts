@@ -5,26 +5,26 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { initializeApp, getApps, getApp } from 'firebase-admin/app';
 import { getAuth, DecodedIdToken } from 'firebase-admin/auth';
-import { renderPayslipPdfBuffer } from './payslipPdf.ts';
+import { renderPayslipPdfBuffer } from './payslipPdf.js';
 import {
   computeEmployeeLeaveAccrualPlan,
   EngineApprovedLeaveInput,
   EngineEmployeeInput,
   LeaveLedgerEntry,
   normalizeLeavePolicyConfig,
-} from '../shared/leaveAccrualEngine.ts';
+} from '../shared/leaveAccrualEngine.js';
 import {
   EngineCelebrationProfileInput,
   evaluateCelebrationsWindow,
   normalizeCelebrationSettings,
-} from '../shared/celebrationEngine.ts';
+} from '../shared/celebrationEngine.js';
 import {
   computeRegularizedAttendanceMetrics,
   RegularizationRequestType,
   resolveSafeTimezone,
   validateRegularizationPayload,
-} from '../shared/regularizationEngine.ts';
-import { SmartAttendanceReminderService } from './pushScheduler.ts';
+} from '../shared/regularizationEngine.js';
+import { SmartAttendanceReminderService } from './pushScheduler.js';
 
 const BOOTSTRAPPED_ADMIN_EMAIL = 'enquiry.revivo@gmail.com';
 const __filename = fileURLToPath(import.meta.url);
@@ -128,6 +128,16 @@ export function createApiApp() {
     max: 120,
     standardHeaders: true,
     legacyHeaders: false,
+    validate: false,
+    keyGenerator: (req) => {
+      const forwarded = req.headers['x-forwarded-for'];
+      const firstForwarded = Array.isArray(forwarded)
+        ? forwarded[0]
+        : typeof forwarded === 'string'
+        ? forwarded.split(',')[0]?.trim()
+        : '';
+      return req.ip || firstForwarded || 'unknown';
+    },
     message: { error: 'Too many requests. Please wait a moment and try again.' },
   });
   app.use('/api/', apiLimiter);
@@ -137,6 +147,7 @@ export function createApiApp() {
     const now = new Date();
     const tz = typeof req.query.tz === 'string' && req.query.tz ? req.query.tz : 'Asia/Kolkata';
     const resolved = resolveTimezoneParts(now, tz);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.json({
       iso: now.toISOString(),
       epochMs: now.getTime(),

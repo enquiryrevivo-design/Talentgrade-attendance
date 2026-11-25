@@ -16,7 +16,7 @@ import {
   normalizeEmployeeReminderPreferences,
   resolveSafeReminderTimezone,
   resolveEmployeeTimezoneParts,
-} from '../shared/attendanceReminderEngine.ts';
+} from '../shared/attendanceReminderEngine.js';
 
 export interface VapidKeyPair {
   publicKey: string;
@@ -104,11 +104,26 @@ export class SmartAttendanceReminderService {
     this.stateFile = path.join(this.dataDir, 'reminder-state.json');
 
     this.vapidKeys = this.loadOrCreateVapidKeys();
-    webPush.setVapidDetails(
-      this.vapidKeys.subject,
-      this.vapidKeys.publicKey,
-      this.vapidKeys.privateKey
-    );
+    try {
+      webPush.setVapidDetails(
+        this.vapidKeys.subject,
+        this.vapidKeys.publicKey,
+        this.vapidKeys.privateKey
+      );
+    } catch (err) {
+      console.warn('Invalid VAPID configuration detected; falling back to generated runtime VAPID keys:', err);
+      const fallback = webPush.generateVAPIDKeys();
+      this.vapidKeys = {
+        publicKey: fallback.publicKey,
+        privateKey: fallback.privateKey,
+        subject: 'mailto:hr@talentgrade.io',
+      };
+      webPush.setVapidDetails(
+        this.vapidKeys.subject,
+        this.vapidKeys.publicKey,
+        this.vapidKeys.privateKey
+      );
+    }
 
     this.transport =
       options?.transport ||
@@ -125,10 +140,22 @@ export class SmartAttendanceReminderService {
     this.state = this.loadState();
   }
 
+  private normalizeVapidSubject(raw: string): string {
+    const cleaned = raw.trim().replace(/^['"]|['"]$/g, '');
+    if (!cleaned) return 'mailto:hr@talentgrade.io';
+    if (cleaned.startsWith('mailto:') || cleaned.startsWith('https://')) {
+      return cleaned;
+    }
+    if (cleaned.includes('@')) {
+      return `mailto:${cleaned}`;
+    }
+    return 'mailto:hr@talentgrade.io';
+  }
+
   private loadOrCreateVapidKeys(): VapidKeyPair {
-    const envPub = (process.env.VAPID_PUBLIC_KEY || '').trim();
-    const envPriv = (process.env.VAPID_PRIVATE_KEY || '').trim();
-    const envSubj = (process.env.VAPID_SUBJECT || '').trim() || 'mailto:hr@talentgrade.io';
+    const envPub = (process.env.VAPID_PUBLIC_KEY || '').trim().replace(/^['"]|['"]$/g, '');
+    const envPriv = (process.env.VAPID_PRIVATE_KEY || '').trim().replace(/^['"]|['"]$/g, '');
+    const envSubj = this.normalizeVapidSubject(process.env.VAPID_SUBJECT || '');
 
     if (envPub && envPriv) {
       return { publicKey: envPub, privateKey: envPriv, subject: envSubj };
@@ -141,7 +168,7 @@ export class SmartAttendanceReminderService {
           return {
             publicKey: parsed.publicKey,
             privateKey: parsed.privateKey,
-            subject: parsed.subject || envSubj,
+            subject: this.normalizeVapidSubject(parsed.subject || envSubj),
           };
         }
       } catch {
