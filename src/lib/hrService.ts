@@ -1288,6 +1288,103 @@ export async function updateEmployeeProfile(
   }
 }
 
+export async function completeFirstLoginPasswordChangeInApp(employee: Employee): Promise<string> {
+  const user = auth.currentUser;
+  if (!user) throw new Error('No active authenticated session.');
+
+  const callEndpoint = async (forceRefresh: boolean) => {
+    const token = await user.getIdToken(forceRefresh);
+    return fetch('/api/auth/complete-password-change', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({}),
+    });
+  };
+
+  let shouldFallbackToClientFirestore = false;
+  try {
+    let res = await callEndpoint(true);
+    if (res.status === 401) {
+      res = await callEndpoint(true);
+    }
+
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok) {
+      if (contentType.includes('application/json')) {
+        const body = (await res.json().catch(() => null)) as { ok?: boolean; employeeId?: string } | null;
+        if (body?.employeeId) return body.employeeId;
+      }
+      return employee.id;
+    }
+
+    // If API endpoint isn't hosted in this environment (e.g., static preview returning HTML 404), fall back safely
+    if (res.status === 404 && !contentType.includes('application/json')) {
+      shouldFallbackToClientFirestore = true;
+    } else {
+      let detail = '';
+      if (contentType.includes('application/json')) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        if (errBody && typeof errBody.error === 'string') {
+          detail = errBody.error;
+        }
+      }
+      throw new Error(detail || `Could not finalize password change (HTTP ${res.status}).`);
+    }
+  } catch (err: unknown) {
+    // Network/transport failure when API server isn't reachable -> allow scoped client Firestore update
+    if (err instanceof TypeError) {
+      shouldFallbackToClientFirestore = true;
+    } else if (!shouldFallbackToClientFirestore) {
+      throw err;
+    }
+  }
+
+  let targetEmployeeId = employee.id;
+  try {
+    if (!targetEmployeeId || employee.uid !== user.uid) {
+      const byUidSnap = await getDocs(query(collection(db, 'employees'), where('uid', '==', user.uid), limit(1)));
+      if (!byUidSnap.empty) {
+        targetEmployeeId = byUidSnap.docs[0].id;
+      }
+    }
+    if (!targetEmployeeId) {
+      throw new Error('Employee profile not found for this authenticated account.');
+    }
+
+    await updateDoc(doc(db, 'employees', targetEmployeeId), {
+      mustChangePassword: false,
+      updatedAt: serverTimestamp(),
+    });
+
+    // Ensure roles/{uid} exists so subsequent app features (selfie, attendance, leave) succeed
+    try {
+      const roleRef = doc(db, 'roles', user.uid);
+      const roleSnap = await getDoc(roleRef);
+      if (!roleSnap.exists()) {
+        await setDoc(roleRef, {
+          uid: user.uid,
+          email: (employee.email || user.email || '').trim().toLowerCase().slice(0, 120),
+          role: employee.role,
+          employeeId: targetEmployeeId,
+          status: employee.status,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } catch (roleErr) {
+      console.warn('Role sync skipped after password change:', roleErr);
+    }
+
+    return targetEmployeeId;
+  } catch (fsErr) {
+    handleFirestoreError(fsErr, OperationType.UPDATE, `employees/${targetEmployeeId || 'unknown'}`);
+  }
+}
+
 export async function punchIn(params: {
   employee: Employee;
   settings: CompanySettings;

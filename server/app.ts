@@ -184,6 +184,166 @@ export function createApiApp() {
     });
   });
 
+  // Scoped first-login password-change completion endpoint.
+  // Resolves the employee document strictly from the verified Firebase UID (never trusting client employeeId)
+  // and updates only mustChangePassword=false + server updatedAt, ensuring roles/{uid} exists if missing.
+  app.post('/api/auth/complete-password-change', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const uid = req.authUser?.uid;
+    const bearerToken = req.bearerToken;
+    if (!uid || !bearerToken) {
+      return res.status(401).json({ error: 'Unauthorized: Valid session required.' });
+    }
+
+    try {
+      const { projectId, databaseId } = resolveFirebaseConfig();
+      const dbRootUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents`;
+
+      type FirestoreFieldMap = Record<string, { stringValue?: string; booleanValue?: boolean }>;
+      type RunQueryHit = { document?: { name?: string; fields?: FirestoreFieldMap } };
+
+      const queryByField = async (fieldPath: string, value: string) => {
+        const resp = await fetch(`${dbRootUrl}:runQuery`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${bearerToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            structuredQuery: {
+              from: [{ collectionId: 'employees' }],
+              where: {
+                fieldFilter: {
+                  field: { fieldPath },
+                  op: 'EQUAL',
+                  value: { stringValue: value },
+                },
+              },
+              limit: 1,
+            },
+          }),
+        });
+        if (!resp.ok) {
+          const text = await resp.text().catch(() => '');
+          throw new Error(`Firestore employee lookup failed (${resp.status}): ${text.slice(0, 200)}`);
+        }
+        const rows = (await resp.json()) as RunQueryHit[];
+        return rows.find((r) => r.document?.name)?.document || null;
+      };
+
+      let empDoc = await queryByField('uid', uid);
+      if (!empDoc && req.authUser?.email_verified === true && req.authUser?.email) {
+        empDoc = await queryByField('email', req.authUser.email.toLowerCase());
+      }
+
+      if (!empDoc || !empDoc.name) {
+        return res.status(404).json({ error: 'Employee profile not found for this authenticated account.' });
+      }
+
+      const employeeDocId = empDoc.name.split('/').pop() || '';
+      const fields = empDoc.fields || {};
+      const docUid = fields.uid?.stringValue || '';
+      const docStatus = fields.status?.stringValue || '';
+      const docRole = fields.role?.stringValue || 'employee';
+      const docEmail = (fields.email?.stringValue || req.authUser?.email || '').toLowerCase();
+
+      if (docStatus !== 'Active') {
+        return res.status(403).json({
+          error: `Account is marked as ${docStatus || 'Inactive'}. Contact your Super Admin.`,
+        });
+      }
+
+      if (docUid && docUid !== uid) {
+        return res.status(403).json({
+          error: 'Forbidden: Authenticated user does not own this employee profile.',
+        });
+      }
+
+      const updateFields: Record<string, { stringValue?: string; booleanValue?: boolean }> = {
+        mustChangePassword: { booleanValue: false },
+      };
+      const fieldPaths = ['mustChangePassword'];
+      if (!docUid && req.authUser?.email_verified === true) {
+        updateFields.uid = { stringValue: uid };
+        fieldPaths.push('uid');
+      }
+
+      const writes: Array<Record<string, unknown>> = [
+        {
+          update: {
+            name: empDoc.name,
+            fields: updateFields,
+          },
+          updateMask: { fieldPaths },
+          updateTransforms: [
+            {
+              fieldPath: 'updatedAt',
+              setToServerValue: 'REQUEST_TIME',
+            },
+          ],
+          currentDocument: { exists: true },
+        },
+      ];
+
+      // Ensure roles/{uid} exists for subsequent self-service reads/writes if it was omitted
+      const roleCheckResp = await fetch(`${dbRootUrl}/roles/${encodeURIComponent(uid)}`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${bearerToken}` },
+      });
+      if (!roleCheckResp.ok && roleCheckResp.status !== 404) {
+        console.warn('Role existence check returned unexpected status:', roleCheckResp.status);
+      }
+      const boundedRoleEmail = docEmail.slice(0, 120);
+      if (roleCheckResp.status === 404 && boundedRoleEmail.length >= 3 && employeeDocId) {
+        writes.push({
+          update: {
+            name: `${dbRootUrl.replace(/^https:\/\/firestore\.googleapis\.com\/v1\//, '')}/roles/${encodeURIComponent(uid)}`,
+            fields: {
+              uid: { stringValue: uid },
+              email: { stringValue: boundedRoleEmail },
+              role: { stringValue: docRole },
+              employeeId: { stringValue: employeeDocId },
+              status: { stringValue: 'Active' },
+            },
+          },
+          updateTransforms: [
+            {
+              fieldPath: 'updatedAt',
+              setToServerValue: 'REQUEST_TIME',
+            },
+          ],
+          currentDocument: { exists: false },
+        });
+      }
+
+      const commitResp = await fetch(`${dbRootUrl}:commit`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${bearerToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ writes }),
+      });
+
+      if (!commitResp.ok) {
+        const errText = await commitResp.text().catch(() => '');
+        console.error('Complete password change commit failed:', commitResp.status, errText);
+        return res.status(commitResp.status === 403 ? 403 : 500).json({
+          error: 'Could not finalize password change in Firestore.',
+        });
+      }
+
+      res.json({
+        ok: true,
+        employeeId: employeeDocId,
+        uid,
+        mustChangePassword: false,
+      });
+    } catch (err) {
+      console.error('Error completing first-login password change:', err);
+      res.status(500).json({ error: 'Failed to finalize password change status.' });
+    }
+  });
+
   // Server-side Leave Accrual & Policy Engine (authoritative server clock)
   app.post('/api/leave/accrual/compute', requireAuth, (req: AuthenticatedRequest, res: Response) => {
     try {

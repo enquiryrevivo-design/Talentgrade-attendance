@@ -10,7 +10,7 @@ import {
 } from 'firebase/auth';
 import { auth, googleAuthProvider } from '../lib/firebase';
 import { CompanySettings, Employee } from '../types/hr';
-import { fetchMediaAsset, resolveEmployeeSession, updateEmployeeProfile } from '../lib/hrService';
+import { completeFirstLoginPasswordChangeInApp, fetchMediaAsset, resolveEmployeeSession } from '../lib/hrService';
 import { syncReminderSnapshotToServer } from '../lib/pushService';
 
 interface AuthContextValue {
@@ -135,9 +135,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const completeFirstLoginPasswordChange = async (newPassword: string) => {
-    if (!firebaseUser || !employee) throw new Error('No active session');
+    const activeUser = auth.currentUser || firebaseUser;
+    if (!activeUser || !employee) throw new Error('No active session');
     try {
-      await updatePassword(firebaseUser, newPassword);
+      await updatePassword(activeUser, newPassword);
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || '';
       if (code === 'auth/requires-recent-login') {
@@ -148,8 +149,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       throw err;
     }
-    await updateEmployeeProfile(employee.id, { mustChangePassword: false }, employee);
-    setEmployee((prev) => (prev ? { ...prev, mustChangePassword: false } : prev));
+
+    // updatePassword rotates auth refresh tokens; force-refresh the ID token before persisting profile state.
+    await activeUser.getIdToken(true);
+    const resolvedEmployeeId = await completeFirstLoginPasswordChangeInApp(employee);
+    setEmployee((prev) =>
+      prev ? { ...prev, id: resolvedEmployeeId || prev.id, mustChangePassword: false } : prev
+    );
+
+    void resolveEmployeeSession(activeUser)
+      .then((res) => {
+        if (res?.employee) {
+          setEmployee(res.employee);
+          setSettings(res.settings);
+        }
+      })
+      .catch(() => {});
   };
 
   const logout = async () => {

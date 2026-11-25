@@ -176,7 +176,7 @@ service cloud.firestore {
         isOptionalStringSize(data, 'officeStartTime', 5) &&
         isOptionalStringSize(data, 'officeEndTime', 5) &&
         (!( 'gracePeriodMinutes' in data ) || (data.gracePeriodMinutes is number && data.gracePeriodMinutes >= 0 && data.gracePeriodMinutes <= 180)) &&
-        (!( 'halfDayMinHours' in data ) || (data.halfDayMinHours is number && data.halfDayMinHours >= 1 && data.halfDayMinHours <= 12)) &&
+        (!( 'halfDayMinHours' in data ) || (data.halfDayMinHours is number && data.halfDayMinHours >= 0.5 && data.halfDayMinHours <= 12)) &&
         (!( 'fullDayMinHours' in data ) || (data.fullDayMinHours is number && data.fullDayMinHours >= 1 && data.fullDayMinHours <= 16)) &&
         (!( 'workingDays' in data ) || (data.workingDays is list && data.workingDays.size() <= 7)) &&
         isOptionalStringSize(data, 'managerUid', 128) &&
@@ -714,15 +714,23 @@ service cloud.firestore {
         isSuperAdmin() ||
         (isBootstrappedAdmin() && incoming().email == request.auth.token.email && incoming().role == 'super_admin')
       );
-      allow update: if isValidId(employeeId) && isValidEmployee(incoming()) && incoming().createdAt == existing().createdAt && (
-        isSuperAdmin() ||
-        (hasLeaderPermission('canApproveLeaves') &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['sickLeaveBalance', 'casualLeaveBalance', 'carryForwardBalance', 'updatedAt'])) ||
-        (hasVerifiedEmail() && existing().email == request.auth.token.email && (existing().uid == '' || existing().uid == request.auth.uid) &&
-          incoming().uid == request.auth.uid &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['uid', 'mustChangePassword', 'failedLoginAttempts', 'lockedUntil', 'updatedAt'])) ||
-        (isActiveEmployee() && existing().uid == request.auth.uid &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['phone', 'emergencyContact', 'profilePhotoAssetId', 'mustChangePassword', 'reminderPreferences', 'updatedAt']))
+      allow update: if isValidId(employeeId) && (
+        (isValidEmployee(incoming()) && incoming().createdAt == existing().createdAt && (
+          isSuperAdmin() ||
+          (hasLeaderPermission('canApproveLeaves') &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['sickLeaveBalance', 'casualLeaveBalance', 'carryForwardBalance', 'updatedAt'])) ||
+          (hasVerifiedEmail() && existing().email == request.auth.token.email && (existing().uid == '' || existing().uid == request.auth.uid) &&
+            incoming().uid == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['uid', 'mustChangePassword', 'failedLoginAttempts', 'lockedUntil', 'updatedAt'])) ||
+          (hasAuth() && existing().uid == request.auth.uid && existing().status == 'Active' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['phone', 'emergencyContact', 'profilePhotoAssetId', 'mustChangePassword', 'reminderPreferences', 'updatedAt']))
+        )) ||
+        (hasAuth() &&
+          existing().uid == request.auth.uid &&
+          existing().status == 'Active' &&
+          incoming().mustChangePassword == false &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['mustChangePassword', 'updatedAt']))
       );
       allow delete: if isSuperAdmin() && isValidId(employeeId);
     }
