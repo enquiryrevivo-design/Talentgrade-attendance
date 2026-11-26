@@ -14,11 +14,12 @@ import {
   X,
   Cake,
 } from 'lucide-react';
-import { AppPage, UserRole } from '../types/hr';
+import { AppPage, normalizeCompanyId, resolveCompanyProfile, UserRole } from '../types/hr';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { useHrNotifications } from '../context/HrNotificationContext';
 import { TalentGradeLogo } from './TalentGradeLogo';
+import { CompanyBadge } from './CompanyBadge';
 import { NotificationBell } from './NotificationBell';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -80,14 +81,21 @@ export function AppShell({ activePage, onNavigate, children }: AppShellProps) {
       ? 'Team Leader'
       : 'Employee';
 
-  const companyName = settings?.companyName || 'TalentGrade';
+  const activeBrandId =
+    employee.role === 'super_admin' ? 'talentgrade' : normalizeCompanyId(employee.companyId);
+  const resolvedBrand = resolveCompanyProfile(activeBrandId, settings);
+  const companyName = resolvedBrand.shortName;
 
   return (
     <div className="min-h-screen bg-zinc-100 dark:bg-zinc-950 text-zinc-950 dark:text-zinc-100 flex flex-col lg:flex-row">
       {/* Desktop Sidebar */}
       <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:fixed lg:inset-y-0 bg-white dark:bg-zinc-900 border-r border-zinc-200 dark:border-zinc-800 z-30">
         <div className="px-5 py-5 border-b border-zinc-200 dark:border-zinc-800">
-          <TalentGradeLogo logoUrl={companyLogoUrl} companyName={companyName} />
+          <TalentGradeLogo
+            logoUrl={companyLogoUrl}
+            companyId={activeBrandId}
+            companyName={companyName}
+          />
         </div>
 
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
@@ -131,6 +139,9 @@ export function AppShell({ activePage, onNavigate, children }: AppShellProps) {
               <div className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
                 {employee.employeeCode} · {roleLabel}
               </div>
+              <div className="mt-1">
+                <CompanyBadge companyId={employee.companyId} />
+              </div>
             </div>
           </div>
 
@@ -159,7 +170,12 @@ export function AppShell({ activePage, onNavigate, children }: AppShellProps) {
       {/* Mobile Compact Sticky Header (52px) */}
       <header className="lg:hidden sticky top-0 z-30 h-13 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md border-b border-zinc-200 dark:border-zinc-800 px-4 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5 min-w-0">
-          <TalentGradeLogo logoUrl={companyLogoUrl} companyName={companyName} compact />
+          <TalentGradeLogo
+            logoUrl={companyLogoUrl}
+            companyId={activeBrandId}
+            companyName={companyName}
+            compact
+          />
           <span className="font-display font-semibold text-sm truncate">{currentTitle}</span>
         </div>
 
@@ -185,8 +201,11 @@ export function AppShell({ activePage, onNavigate, children }: AppShellProps) {
       {/* Main Content */}
       <main className="flex-1 lg:pl-64 pb-20 lg:pb-8">
         <div className="hidden lg:flex items-center justify-between max-w-7xl mx-auto px-8 pt-5 pb-1">
-          <div className="text-xs text-zinc-500 dark:text-zinc-400">
-            {companyName} · <span className="font-medium text-zinc-900 dark:text-zinc-100">{currentTitle}</span>
+          <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+            <span>{resolvedBrand.legalName}</span>
+            <span>·</span>
+            <span className="font-medium text-zinc-900 dark:text-zinc-100">{currentTitle}</span>
+            <CompanyBadge companyId={employee.companyId} />
           </div>
           <NotificationBell onNavigate={onNavigate} align="right" />
         </div>

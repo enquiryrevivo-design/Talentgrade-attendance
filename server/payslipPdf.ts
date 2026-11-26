@@ -2,6 +2,12 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import PDFDocument from 'pdfkit';
+import {
+  assertCurrencyAllowedForCompany,
+  CompanyId,
+  resolveCompanyProfile,
+  SettingsLikeForCompanies,
+} from '../shared/companyConfig.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -58,6 +64,12 @@ export interface PayslipPdfInput {
     employeeCode?: string;
     designation?: string;
     department?: string;
+    companyId?: CompanyId | string;
+    companyName?: string;
+    companyAddress?: string;
+    companyLogoAssetId?: string;
+    companyOverridden?: boolean;
+    generatedAtIso?: string;
     location?: string;
     currency?: string;
     month: string;
@@ -76,16 +88,38 @@ export interface PayslipPdfInput {
     status?: string;
     notes?: string;
   };
-  company?: {
-    companyName?: string;
-    companyAddress?: string;
-    companyPhone?: string;
-    companyEmail?: string;
-    companyWebsite?: string;
-    taxId?: string;
+  company?: (SettingsLikeForCompanies & {
+    companyId?: CompanyId | string;
     currency?: string;
-  } | null;
+  }) | null;
   logoDataUrl?: string;
+}
+
+function drawBrandEmblem(
+  doc: PDFKit.PDFDocument,
+  x: number,
+  y: number,
+  size: number,
+  companyId: CompanyId,
+  brandRed: string
+) {
+  const scale = size / 36;
+  doc.save();
+  doc.translate(x, y);
+  doc.scale(scale);
+  doc.roundedRect(0, 0, 36, 36, 7).fill('#000000');
+  if (companyId === 'mygrade') {
+    doc
+      .path('M 8.5 24 L 8.5 11 L 12.4 11 L 18 18.8 L 23.6 11 L 27.5 11 L 27.5 24 L 23.9 24 L 23.9 16.2 L 19.1 22.7 L 16.9 22.7 L 12.1 16.2 L 12.1 24 Z')
+      .fill('#FFFFFF');
+    doc.roundedRect(8.5, 27, 19, 3, 1).fill(brandRed);
+  } else {
+    doc
+      .path('M 9 11 L 27 11 L 27 15 L 20 15 L 20 25 L 16 25 L 16 15 L 9 15 Z')
+      .fill('#FFFFFF');
+    doc.roundedRect(9, 27, 18, 3, 1).fill(brandRed);
+  }
+  doc.restore();
 }
 
 export function renderPayslipPdfBuffer({
@@ -95,6 +129,21 @@ export function renderPayslipPdfBuffer({
 }: PayslipPdfInput): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     try {
+      const resolvedCompany = resolveCompanyProfile(
+        payslip.companyId || company?.companyId,
+        company,
+        {
+          companyId: payslip.companyId as CompanyId | undefined,
+          companyName: payslip.companyName,
+          companyAddress: payslip.companyAddress,
+          companyLogoAssetId: payslip.companyLogoAssetId,
+          companyOverridden: payslip.companyOverridden,
+        }
+      );
+
+      const rawCurrency = (payslip.currency || resolvedCompany.defaultCurrency || company?.currency || 'INR').toUpperCase();
+      const currency = assertCurrencyAllowedForCompany(resolvedCompany.companyId, rawCurrency);
+
       const regularFontPath = resolveFontPath(
         'NotoSans-Regular.ttf',
         '/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf'
@@ -104,13 +153,19 @@ export function renderPayslipPdfBuffer({
         '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf'
       );
 
+      const generatedDate =
+        typeof payslip.generatedAtIso === 'string' && payslip.generatedAtIso.trim().length >= 10
+          ? payslip.generatedAtIso.trim().slice(0, 10)
+          : new Date().toISOString().slice(0, 10);
+
       const margin = 44;
+      const companyLegalName = resolvedCompany.legalName;
       const doc = new PDFDocument({
         size: 'A4',
         margins: { top: 38, left: margin, right: margin, bottom: 20 },
         info: {
-          Title: `${company?.companyName || 'TalentGrade'} Payslip - ${payslip.employeeName} - ${payslip.month}`,
-          Author: company?.companyName || 'TalentGrade',
+          Title: `${companyLegalName} Payslip - ${payslip.employeeName} - ${payslip.month}`,
+          Author: companyLegalName,
           Subject: `Monthly Payroll Statement (${formatMonthLabel(payslip.month)})`,
         },
       });
@@ -123,7 +178,6 @@ export function renderPayslipPdfBuffer({
       doc.registerFont('NotoSans', regularFontPath);
       doc.registerFont('NotoSans-Bold', boldFontPath);
 
-      const currency = (payslip.currency || company?.currency || 'INR').toUpperCase();
       const currencyDisplay = currency === 'INR' ? 'INR (\u20B9)' : currency;
       const currencySubtitle =
         currency === 'INR'
@@ -143,14 +197,12 @@ export function renderPayslipPdfBuffer({
       const ruleMid = '#D4D4D8';
       const ruleLight = '#E4E4E7';
 
-      const companyName = (company?.companyName || 'TalentGrade').trim() || 'TalentGrade';
-
       // =========================================================================
       // 1. HEADER: Left Brand + Company Info | Right Payslip Title, Month & Status
       // =========================================================================
       const headerTop = 38;
       let hasLogoImage = false;
-      const logoSize = 38;
+      const logoSize = 36;
 
       if (
         typeof logoDataUrl === 'string' &&
@@ -168,50 +220,57 @@ export function renderPayslipPdfBuffer({
         }
       }
 
-      const brandLeft = hasLogoImage ? margin + logoSize + 12 : margin;
-      const rightColWidth = 175;
-      const leftColWidth = pageWidth - rightColWidth - 20 - (hasLogoImage ? logoSize + 12 : 0);
+      if (!hasLogoImage) {
+        drawBrandEmblem(doc, margin, headerTop + 2, logoSize, resolvedCompany.companyId, brandRed);
+      }
 
-      // Typographic wordmark (or uploaded logo + company name) with restrained red accent
+      const brandLeft = margin + logoSize + 12;
+      const rightColWidth = 175;
+      const leftColWidth = pageWidth - rightColWidth - 20 - (logoSize + 12);
+
+      let leftCursorY = headerTop;
+
+      // Two-tone wordmark when using built-in branding or standard company identity
+      if (!hasLogoImage) {
+        const prefixText = resolvedCompany.companyId === 'mygrade' ? 'My' : 'Talent';
+        const suffixText = 'Grade';
+        doc.font('NotoSans-Bold').fontSize(15);
+        const prefixW = doc.widthOfString(prefixText);
+        doc.fillColor(pureBlack).text(prefixText, brandLeft, leftCursorY);
+        doc.fillColor(brandRed).text(suffixText, brandLeft + prefixW, leftCursorY);
+        leftCursorY += 18;
+      }
+
+      // Full Legal Company Name
       doc
         .fillColor(pureBlack)
         .font('NotoSans-Bold')
-        .fontSize(20)
-        .text(companyName, brandLeft, headerTop, { width: leftColWidth });
+        .fontSize(hasLogoImage ? 14 : 10.5)
+        .text(companyLegalName, brandLeft, leftCursorY, { width: leftColWidth });
 
-      const titleHeight = doc.heightOfString(companyName, { width: leftColWidth });
-      let leftCursorY = headerTop + titleHeight + 4;
+      const titleHeight = doc.heightOfString(companyLegalName, { width: leftColWidth });
+      leftCursorY += titleHeight + 4;
 
-      if (!hasLogoImage) {
-        // Tasteful small TalentGrade red brand accent bar beneath typographic wordmark
-        doc.rect(brandLeft, leftCursorY, 24, 2.2).fill(brandRed);
-        leftCursorY += 9;
-      } else {
-        leftCursorY += 3;
-      }
-
-      // Compact company details directly beneath company name
+      // Company address and optional contact/tax metadata
       const companyMetaLines = [
-        company?.companyAddress?.trim(),
-        [company?.companyPhone?.trim(), company?.companyEmail?.trim()].filter(Boolean).join('  ·  '),
+        resolvedCompany.address,
+        [resolvedCompany.phone, resolvedCompany.email].filter(Boolean).join('  ·  '),
         [
-          company?.companyWebsite?.trim(),
-          company?.taxId?.trim() ? `Reg / Tax ID: ${company.taxId.trim()}` : '',
+          resolvedCompany.website,
+          resolvedCompany.taxId ? `Reg / Tax ID: ${resolvedCompany.taxId}` : '',
         ]
           .filter(Boolean)
           .join('  ·  '),
       ].filter((line): line is string => Boolean(line));
 
-      doc.font('NotoSans').fontSize(8.2).fillColor(muted);
+      doc.font('NotoSans').fontSize(8).fillColor(muted);
       for (const line of companyMetaLines) {
         const lineH = doc.heightOfString(line, { width: leftColWidth, lineGap: 1.5 });
         doc.text(line, brandLeft, leftCursorY, { width: leftColWidth, lineGap: 1.5 });
         leftCursorY += lineH + 2.5;
       }
 
-      if (hasLogoImage) {
-        leftCursorY = Math.max(leftCursorY, headerTop + logoSize + 6);
-      }
+      leftCursorY = Math.max(leftCursorY, headerTop + logoSize + 6);
 
       // Right Header: PAYSLIP title, payroll month, and discreet status
       const headerRightX = margin + pageWidth - rightColWidth;
@@ -236,12 +295,12 @@ export function renderPayslipPdfBuffer({
         });
 
       const monthHeight = doc.heightOfString(monthText, { width: rightColWidth });
-      const statusText = `Status: ${payslip.status || 'Published'}`;
+      const statusText = `Status: ${payslip.status || 'Published'} · Issued ${generatedDate}`;
       const statusY = headerTop + 16 + monthHeight + 4;
       doc
         .fillColor(muted)
         .font('NotoSans')
-        .fontSize(8.5)
+        .fontSize(8)
         .text(statusText, headerRightX, statusY, {
           width: rightColWidth,
           align: 'right',
@@ -300,7 +359,7 @@ export function renderPayslipPdfBuffer({
         ],
         [
           { label: 'Leave Days', value: formatDays(payslip.leaveDays) },
-          null,
+          { label: 'Payslip Date', value: generatedDate },
         ],
       ];
 
@@ -679,15 +738,14 @@ export function renderPayslipPdfBuffer({
 
       doc.moveTo(margin, footerY).lineTo(margin + pageWidth, footerY).strokeColor(ruleMid).lineWidth(0.6).stroke();
 
-      const generatedDate = new Date().toISOString().slice(0, 10);
-      const footerLeftWidth = 195;
+      const footerLeftWidth = 225;
       const footerRightWidth = pageWidth - footerLeftWidth - 8;
 
       doc
         .fillColor(lightMuted)
         .font('NotoSans')
         .fontSize(7.5)
-        .text(`${companyName} · Confidential Payroll Statement`, margin, footerY + 9, {
+        .text(`${companyLegalName} · Confidential Payroll Statement`, margin, footerY + 9, {
           width: footerLeftWidth,
           height: 11,
           ellipsis: true,

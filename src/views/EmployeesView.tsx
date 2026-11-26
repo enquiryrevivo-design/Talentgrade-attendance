@@ -17,14 +17,17 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../components/Toast';
 import {
   AttendanceRecord,
+  CompanyId,
   Department,
   Employee,
   EmployeeSalary,
   EmployeeStatus,
   LeaveApplication,
   LeaveLedgerEntry,
+  normalizeCompanyId,
   UserRole,
 } from '../types/hr';
+import { CompanyBadge } from '../components/CompanyBadge';
 import {
   adjustEmployeeLeaveBalance,
   BOOTSTRAPPED_ADMIN_EMAIL,
@@ -97,6 +100,7 @@ export function EmployeesView() {
   const [loading, setLoading] = useState(true);
 
   const [search, setSearch] = useState('');
+  const [companyFilter, setCompanyFilter] = useState<'all' | CompanyId>('all');
   const [locationFilter, setLocationFilter] = useState('all');
   const [deptFilter, setDeptFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -109,6 +113,7 @@ export function EmployeesView() {
   const [leaveManualOverride, setLeaveManualOverride] = useState(false);
   const [newPhotoPreview, setNewPhotoPreview] = useState<string | null>(null);
   const [newEmp, setNewEmp] = useState({
+    companyId: '' as CompanyId | '',
     fullName: '',
     employeeCode: '',
     email: '',
@@ -249,6 +254,14 @@ export function EmployeesView() {
     return plan.summary;
   };
 
+  const handleNewCompanyChange = (companyId: CompanyId) => {
+    setNewEmp((p) => ({
+      ...p,
+      companyId,
+      currency: companyId === 'mygrade' ? 'INR' : p.currency,
+    }));
+  };
+
   const handleNewLocationChange = (loc: string) => {
     const preset = LOCATION_PRESETS[loc];
     const nextTz = preset ? preset.timezone : newEmp.timezone;
@@ -262,7 +275,7 @@ export function EmployeesView() {
       ...p,
       location: loc,
       timezone: nextTz,
-      currency: preset ? preset.currency : p.currency,
+      currency: p.companyId === 'mygrade' ? 'INR' : preset ? preset.currency : p.currency,
       ...(leaveManualOverride
         ? {}
         : {
@@ -275,12 +288,15 @@ export function EmployeesView() {
 
   const handleEditLocationChange = (loc: string) => {
     const preset = LOCATION_PRESETS[loc];
-    setEditForm((p) => ({
-      ...p,
-      location: loc,
-      timezone: preset ? preset.timezone : p.timezone,
-      currency: preset ? preset.currency : p.currency,
-    }));
+    setEditForm((p) => {
+      const empCompany = normalizeCompanyId(p.companyId || selectedEmp?.companyId);
+      return {
+        ...p,
+        location: loc,
+        timezone: preset ? preset.timezone : p.timezone,
+        currency: empCompany === 'mygrade' ? 'INR' : preset ? preset.currency : p.currency,
+      };
+    });
   };
 
   const handleNewPhotoSelect = async (file: File) => {
@@ -339,7 +355,9 @@ export function EmployeesView() {
     setQuickAdjType('SL');
     setQuickAdjDelta(1);
     setQuickAdjReason('');
+    const empCompany = normalizeCompanyId(emp.companyId);
     setEditForm({
+      companyId: empCompany,
       fullName: emp.fullName,
       email: emp.email,
       phone: emp.phone || '',
@@ -352,7 +370,7 @@ export function EmployeesView() {
       status: emp.status,
       location: emp.location || effective.location,
       timezone: emp.timezone || effective.timezone,
-      currency: emp.currency || effective.currency,
+      currency: empCompany === 'mygrade' ? 'INR' : emp.currency || effective.currency,
       officeStartTime: effective.officeStartTime,
       officeEndTime: effective.officeEndTime,
       gracePeriodMinutes: effective.gracePeriodMinutes,
@@ -382,7 +400,10 @@ export function EmployeesView() {
         const sal = await fetchEmployeeSalary(emp.id);
         setEmpSalary(sal);
         setSalaryForm({
-          currency: sal?.currency || emp.currency || effective.currency,
+          currency:
+            empCompany === 'mygrade'
+              ? 'INR'
+              : sal?.currency || emp.currency || effective.currency,
           basicSalary: sal?.basicSalary ?? 0,
           hra: sal?.hra ?? 0,
           professionalTax: sal?.professionalTax ?? 0,
@@ -396,6 +417,10 @@ export function EmployeesView() {
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!newEmp.companyId) {
+      showToast('Please select a company (TalentGrade or MyGrade) before creating the employee.', 'error');
+      return;
+    }
     setCreating(true);
     try {
       let profilePhotoAssetId: string | undefined;
@@ -411,6 +436,7 @@ export function EmployeesView() {
 
       const res = await createEmployeeAccount(
         {
+          companyId: newEmp.companyId,
           employeeCode: newEmp.employeeCode,
           fullName: newEmp.fullName,
           email: newEmp.email,
@@ -423,7 +449,7 @@ export function EmployeesView() {
           dateOfBirth: newEmp.dateOfBirth || undefined,
           location: newEmp.location,
           timezone: newEmp.timezone,
-          currency: newEmp.currency,
+          currency: newEmp.companyId === 'mygrade' ? 'INR' : newEmp.currency,
           officeStartTime: createCustomSchedule ? newEmp.officeStartTime : undefined,
           officeEndTime: createCustomSchedule ? newEmp.officeEndTime : undefined,
           gracePeriodMinutes: createCustomSchedule ? newEmp.gracePeriodMinutes : undefined,
@@ -454,6 +480,7 @@ export function EmployeesView() {
       const resetJoin = getTodayInTimezone('Asia/Kolkata');
       const resetSummary = computeOpeningBalances(resetJoin, 'Asia/Kolkata');
       setNewEmp({
+        companyId: '',
         fullName: '',
         employeeCode: '',
         email: '',
@@ -496,7 +523,9 @@ export function EmployeesView() {
     if (!selectedEmp || !isSuperAdmin) return;
     setSavingEdit(true);
     try {
+      const nextCompanyId = normalizeCompanyId(editForm.companyId || selectedEmp.companyId);
       const payload: Partial<Employee> = {
+        companyId: nextCompanyId,
         fullName: editForm.fullName,
         phone: editForm.phone,
         emergencyContact: editForm.emergencyContact,
@@ -508,7 +537,7 @@ export function EmployeesView() {
         status: editForm.status,
         location: editForm.location,
         timezone: editForm.timezone,
-        currency: editForm.currency,
+        currency: nextCompanyId === 'mygrade' ? 'INR' : editForm.currency,
         managerUid: editForm.managerUid,
         sickLeaveBalance: editForm.sickLeaveBalance,
         casualLeaveBalance: editForm.casualLeaveBalance,
@@ -650,6 +679,8 @@ export function EmployeesView() {
 
   const filtered = employees.filter((emp) => {
     const loc = emp.location || 'India';
+    const empCompany = normalizeCompanyId(emp.companyId);
+    if (companyFilter !== 'all' && empCompany !== companyFilter) return false;
     if (locationFilter !== 'all' && loc !== locationFilter) return false;
     if (deptFilter !== 'all' && emp.department !== deptFilter) return false;
     if (statusFilter !== 'all' && emp.status !== statusFilter) return false;
@@ -674,10 +705,10 @@ export function EmployeesView() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-display font-semibold text-zinc-950 dark:text-zinc-100">
-            TalentGrade Directory
+            Workforce Directory
           </h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-            {employees.length} team members across India &amp; Dubai, UAE · Manage profiles, schedules, leave balances &amp; currency
+            {employees.length} team members across TalentGrade &amp; MyGrade · Manage companies, schedules, leave balances &amp; currency
           </p>
         </div>
         {isSuperAdmin && (
@@ -689,6 +720,8 @@ export function EmployeesView() {
               setLeaveManualOverride(false);
               setNewEmp((p) => ({
                 ...p,
+                companyId: '',
+                currency: 'INR',
                 employeeCode: `TG-${String(employees.length + 1).padStart(3, '0')}`,
                 joiningDate: initJoin,
                 sickLeaveBalance: opening.sickLeaveBalance,
@@ -726,6 +759,16 @@ export function EmployeesView() {
             className="w-full min-h-[40px] pl-9 pr-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-xs"
           />
         </div>
+
+        <select
+          value={companyFilter}
+          onChange={(e) => setCompanyFilter(e.target.value as 'all' | CompanyId)}
+          className="min-h-[40px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-xs font-medium"
+        >
+          <option value="all">All Companies</option>
+          <option value="talentgrade">TalentGrade</option>
+          <option value="mygrade">MyGrade</option>
+        </select>
 
         <select
           value={locationFilter}
@@ -793,6 +836,7 @@ export function EmployeesView() {
                 <tr className="border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950/50 text-zinc-500">
                   <th className="py-3 px-4 font-medium">Employee</th>
                   <th className="py-3 px-4 font-medium">ID</th>
+                  <th className="py-3 px-4 font-medium">Company</th>
                   <th className="py-3 px-4 font-medium">Department &amp; Role</th>
                   <th className="py-3 px-4 font-medium">Location &amp; Currency</th>
                   <th className="py-3 px-4 font-medium">Status</th>
@@ -826,6 +870,9 @@ export function EmployeesView() {
                         </div>
                       </td>
                       <td className="py-3 px-4 font-mono tabular-nums whitespace-nowrap">{emp.employeeCode}</td>
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        <CompanyBadge companyId={emp.companyId} />
+                      </td>
                       <td className="py-3 px-4">
                         <div>{emp.department}</div>
                         <div className="text-[11px] text-zinc-500">
@@ -947,6 +994,22 @@ export function EmployeesView() {
                 </div>
               </div>
 
+              <div className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800">
+                <label className="block font-medium mb-1">Company *</label>
+                <select
+                  required
+                  value={newEmp.companyId}
+                  onChange={(e) => handleNewCompanyChange(e.target.value as CompanyId)}
+                  className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-medium"
+                >
+                  <option value="" disabled>
+                    Select company (TalentGrade or MyGrade)...
+                  </option>
+                  <option value="talentgrade">TalentGrade — TalentGrade HR Services Pvt Ltd</option>
+                  <option value="mygrade">MyGrade — MyGrade Learning Pvt Ltd (INR only)</option>
+                </select>
+              </div>
+
               <div className="grid sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-medium mb-1">Full Name *</label>
@@ -1030,13 +1093,20 @@ export function EmployeesView() {
                 <div>
                   <label className="block font-medium mb-1">Salary Currency *</label>
                   <select
-                    value={newEmp.currency}
+                    value={newEmp.companyId === 'mygrade' ? 'INR' : newEmp.currency}
                     onChange={(e) => setNewEmp((p) => ({ ...p, currency: e.target.value }))}
                     className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
                   >
                     <option value="INR">INR (₹)</option>
-                    <option value="AED">AED (د.إ)</option>
+                    <option value="AED" disabled={newEmp.companyId === 'mygrade'}>
+                      AED (د.إ) {newEmp.companyId === 'mygrade' ? '(TalentGrade only)' : ''}
+                    </option>
                   </select>
+                  {newEmp.companyId === 'mygrade' && (
+                    <div className="text-[10px] text-[#B5121B] dark:text-red-400 mt-1">
+                      MyGrade supports INR only
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1451,8 +1521,11 @@ export function EmployeesView() {
                   </div>
                 )}
                 <div className="min-w-0">
-                  <h3 className="text-base font-semibold truncate">{selectedEmp.fullName}</h3>
-                  <p className="text-xs text-zinc-500 truncate">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-base font-semibold truncate">{selectedEmp.fullName}</h3>
+                    <CompanyBadge companyId={selectedEmp.companyId} showLegalName />
+                  </div>
+                  <p className="text-xs text-zinc-500 truncate mt-0.5">
                     {selectedEmp.employeeCode} · {selectedEmp.designation} · {selectedEmp.location || 'India'}
                   </p>
                 </div>
@@ -1506,7 +1579,26 @@ export function EmployeesView() {
                     </div>
                   )}
 
-                  <div className="grid sm:grid-cols-2 gap-3">
+                  <div className="grid sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block font-medium mb-1">Company</label>
+                      <select
+                        disabled={!isSuperAdmin}
+                        value={normalizeCompanyId(editForm.companyId || selectedEmp.companyId)}
+                        onChange={(e) => {
+                          const nextCo = e.target.value as CompanyId;
+                          setEditForm((p) => ({
+                            ...p,
+                            companyId: nextCo,
+                            currency: nextCo === 'mygrade' ? 'INR' : p.currency,
+                          }));
+                        }}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 disabled:opacity-70 font-medium"
+                      >
+                        <option value="talentgrade">TalentGrade</option>
+                        <option value="mygrade">MyGrade (INR only)</option>
+                      </select>
+                    </div>
                     <div>
                       <label className="block font-medium mb-1">Full Name</label>
                       <input
@@ -1622,12 +1714,20 @@ export function EmployeesView() {
                       <label className="block font-medium mb-1">Salary Currency</label>
                       <select
                         disabled={!isSuperAdmin}
-                        value={editForm.currency || 'INR'}
+                        value={normalizeCompanyId(editForm.companyId || selectedEmp.companyId) === 'mygrade' ? 'INR' : editForm.currency || 'INR'}
                         onChange={(e) => setEditForm((p) => ({ ...p, currency: e.target.value }))}
                         className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono disabled:opacity-70"
                       >
                         <option value="INR">INR (₹)</option>
-                        <option value="AED">AED (د.إ)</option>
+                        <option
+                          value="AED"
+                          disabled={normalizeCompanyId(editForm.companyId || selectedEmp.companyId) === 'mygrade'}
+                        >
+                          AED (د.إ)
+                          {normalizeCompanyId(editForm.companyId || selectedEmp.companyId) === 'mygrade'
+                            ? ' (TalentGrade only)'
+                            : ''}
+                        </option>
                       </select>
                     </div>
                   </div>
@@ -2150,13 +2250,21 @@ export function EmployeesView() {
                     <label className="block font-medium mb-1">Salary Currency</label>
                     <select
                       disabled={!isSuperAdmin}
-                      value={salaryForm.currency}
+                      value={normalizeCompanyId(selectedEmp.companyId) === 'mygrade' ? 'INR' : salaryForm.currency}
                       onChange={(e) => setSalaryForm((s) => ({ ...s, currency: e.target.value }))}
                       className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
                     >
                       <option value="INR">INR (₹)</option>
-                      <option value="AED">AED (د.إ)</option>
+                      <option value="AED" disabled={normalizeCompanyId(selectedEmp.companyId) === 'mygrade'}>
+                        AED (د.إ)
+                        {normalizeCompanyId(selectedEmp.companyId) === 'mygrade' ? ' (TalentGrade only)' : ''}
+                      </option>
                     </select>
+                    {normalizeCompanyId(selectedEmp.companyId) === 'mygrade' && (
+                      <div className="text-[10px] text-[#B5121B] dark:text-red-400 mt-1">
+                        MyGrade employees support INR only
+                      </div>
+                    )}
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>

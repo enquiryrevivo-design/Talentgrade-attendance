@@ -541,7 +541,7 @@ export function createApiApp() {
     }
   });
 
-  // Server-side PDF Payslip Generation (TalentGrade Black & Crimson Identity, Unicode NotoSans font for ₹)
+  // Server-side PDF Payslip Generation (Company-Aware Black & Crimson Identity, Unicode NotoSans font for ₹)
   app.post('/api/payslips/pdf', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const { payslip, company, logoDataUrl } = req.body || {};
@@ -549,12 +549,42 @@ export function createApiApp() {
         return res.status(400).json({ error: 'Invalid payslip payload' });
       }
 
+      const { assertCurrencyAllowedForCompany, resolveCompanyProfile } = await import(
+        '../shared/companyConfig.js'
+      );
+      const resolvedCompany = resolveCompanyProfile(
+        payslip.companyId || company?.companyId,
+        company,
+        {
+          companyId: payslip.companyId,
+          companyName: payslip.companyName,
+          companyAddress: payslip.companyAddress,
+          companyLogoAssetId: payslip.companyLogoAssetId,
+          companyOverridden: payslip.companyOverridden,
+        }
+      );
+
+      try {
+        assertCurrencyAllowedForCompany(
+          resolvedCompany.companyId,
+          payslip.currency || resolvedCompany.defaultCurrency || company?.currency || 'INR'
+        );
+      } catch (currencyErr) {
+        return res.status(400).json({
+          error:
+            currencyErr instanceof Error
+              ? currencyErr.message
+              : 'Invalid payslip currency for assigned company',
+        });
+      }
+
       const { renderPayslipPdfBuffer } = await import('./payslipPdf.js');
       const pdfBuffer = await renderPayslipPdfBuffer({ payslip, company, logoDataUrl });
+      const safeCompany = resolvedCompany.shortName.replace(/[^a-zA-Z0-9_-]/g, '');
       const safeCode = String(payslip.employeeCode || 'EMP').replace(/[^a-zA-Z0-9_-]/g, '');
       const safeMonth = String(payslip.month || 'month').replace(/[^0-9-]/g, '');
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `inline; filename="TalentGrade_Payslip_${safeCode}_${safeMonth}.pdf"`);
+      res.setHeader('Content-Disposition', `inline; filename="${safeCompany}_Payslip_${safeCode}_${safeMonth}.pdf"`);
       res.send(pdfBuffer);
     } catch (err) {
       console.error('Error generating PDF payslip:', err);

@@ -89,8 +89,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const resolved = await resolveEmployeeSession(user);
       setSettings(resolved.settings);
-      if (resolved.settings?.logoAssetId) {
-        const asset = await fetchMediaAsset(resolved.settings.logoAssetId);
+      const empCompany =
+        resolved.employee && resolved.employee.role !== 'super_admin'
+          ? resolved.employee.companyId || 'talentgrade'
+          : 'talentgrade';
+      const logoAssetId =
+        empCompany === 'mygrade'
+          ? resolved.settings?.companies?.mygrade?.logoAssetId || ''
+          : resolved.settings?.companies?.talentgrade?.logoAssetId ||
+            resolved.settings?.logoAssetId ||
+            '';
+      if (logoAssetId) {
+        const asset = await fetchMediaAsset(logoAssetId);
         setCompanyLogoUrl(asset?.dataUrl || null);
       } else {
         setCompanyLogoUrl(null);

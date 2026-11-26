@@ -4,7 +4,19 @@ import { useAuth } from '../context/AuthContext';
 import { useCelebrations } from '../context/CelebrationContext';
 import { useToast } from '../components/Toast';
 import { TalentGradeLogo } from '../components/TalentGradeLogo';
-import { AuditLog, CelebrationVisibilityScope, CompanySettings, Department, HolidayItem } from '../types/hr';
+import {
+  AuditLog,
+  CelebrationVisibilityScope,
+  COMPANY_IDS,
+  CompanyId,
+  CompanyProfileConfig,
+  CompanySettings,
+  DEFAULT_COMPANIES,
+  Department,
+  HolidayItem,
+  normalizeCompaniesMap,
+} from '../types/hr';
+import { CompanyBadge } from '../components/CompanyBadge';
 import { DEFAULT_LEAVE_POLICY, normalizeLeavePolicyConfig } from '../../shared/leaveAccrualEngine';
 import {
   DEFAULT_CELEBRATION_SETTINGS,
@@ -19,6 +31,7 @@ import {
   deleteDepartment,
   fetchAllEmployees,
   fetchAuditLogs,
+  fetchMediaAsset,
   getDepartments,
   getEffectiveSchedule,
   saveCompanySettings,
@@ -60,6 +73,10 @@ export function SettingsView() {
 
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [auditFilter, setAuditFilter] = useState('');
+  const [companyLogoMap, setCompanyLogoMap] = useState<Record<CompanyId, string>>({
+    talentgrade: '',
+    mygrade: '',
+  });
 
   const isSuperAdmin = employee?.role === 'super_admin';
 
@@ -93,14 +110,16 @@ export function SettingsView() {
 
   useEffect(() => {
     if (settings) {
+      const companies = normalizeCompaniesMap(settings);
       setForm({
-        companyName: settings.companyName || 'TalentGrade',
-        companyAddress: settings.companyAddress || '',
+        companyName: settings.companyName || companies.talentgrade.legalName,
+        companyAddress: settings.companyAddress || companies.talentgrade.address,
         companyPhone: settings.companyPhone || '',
         companyEmail: settings.companyEmail || '',
         companyWebsite: settings.companyWebsite || '',
         taxId: settings.taxId || '',
-        logoAssetId: settings.logoAssetId || '',
+        logoAssetId: settings.logoAssetId || companies.talentgrade.logoAssetId || '',
+        companies,
         locations: settings.locations || ['India', 'Dubai, UAE'],
         supportedCurrencies: settings.supportedCurrencies || ['INR', 'AED'],
         officeStartTime: settings.officeStartTime,
@@ -118,9 +137,27 @@ export function SettingsView() {
         currency: settings.currency || 'INR',
         teamLeaderPermissions: { ...settings.teamLeaderPermissions },
       });
+
+      // Load custom company logos for TalentGrade and MyGrade
+      void (async () => {
+        const nextMap: Record<CompanyId, string> = {
+          talentgrade: companyLogoUrl || '',
+          mygrade: '',
+        };
+        for (const cid of COMPANY_IDS) {
+          const assetId = companies[cid].logoAssetId;
+          if (assetId) {
+            const asset = await fetchMediaAsset(assetId).catch(() => null);
+            if (asset?.dataUrl) nextMap[cid] = asset.dataUrl;
+          } else {
+            nextMap[cid] = '';
+          }
+        }
+        setCompanyLogoMap(nextMap);
+      })();
     }
     loadAux();
-  }, [settings, loadAux]);
+  }, [settings, companyLogoUrl, loadAux]);
 
   if (!employee || !settings) return null;
 
@@ -206,7 +243,44 @@ export function SettingsView() {
     }
   };
 
-  const handleLogoUpload = async (file: File) => {
+  const normalizedCompanies = normalizeCompaniesMap(form);
+
+  const buildUpdatedCompaniesForm = (
+    companyId: CompanyId,
+    patch: Partial<CompanyProfileConfig>
+  ): Omit<CompanySettings, 'updatedAt' | 'updatedBy'> => {
+    const current = normalizedCompanies[companyId];
+    const nextProfile: CompanyProfileConfig = {
+      ...current,
+      ...patch,
+      id: companyId,
+      supportedCurrencies: companyId === 'mygrade' ? ['INR'] : ['INR', 'AED'],
+      defaultCurrency: companyId === 'mygrade' ? 'INR' : patch.defaultCurrency || current.defaultCurrency || 'INR',
+    };
+    const nextCompanies = {
+      ...normalizedCompanies,
+      [companyId]: nextProfile,
+    };
+    const tg = nextCompanies.talentgrade;
+    return {
+      ...form,
+      companies: nextCompanies,
+      companyName: tg.legalName,
+      companyAddress: tg.address,
+      companyPhone: tg.phone || '',
+      companyEmail: tg.email || '',
+      companyWebsite: tg.website || '',
+      taxId: tg.taxId || '',
+      logoAssetId: tg.logoAssetId || '',
+      currency: tg.defaultCurrency || form.currency,
+    };
+  };
+
+  const updateCompanyProfile = (companyId: CompanyId, patch: Partial<CompanyProfileConfig>) => {
+    setForm(buildUpdatedCompaniesForm(companyId, patch));
+  };
+
+  const handleCompanyLogoUpload = async (companyId: CompanyId, file: File) => {
     if (file.size > 500 * 1024) {
       showToast('Logo image must be under 500 KB.', 'error');
       return;
@@ -214,23 +288,38 @@ export function SettingsView() {
     const reader = new FileReader();
     reader.onload = async () => {
       try {
+        const dataUrl = String(reader.result);
         const assetId = await uploadMediaAsset({
           ownerUid: employee.uid,
           assetType: 'company_logo',
           fileName: file.name,
           mimeType: file.type || 'image/png',
-          dataUrl: String(reader.result),
+          dataUrl,
         });
-        const nextForm = { ...form, logoAssetId: assetId };
+        const nextForm = buildUpdatedCompaniesForm(companyId, { logoAssetId: assetId });
         setForm(nextForm);
+        setCompanyLogoMap((prev) => ({ ...prev, [companyId]: dataUrl }));
         await saveCompanySettings(nextForm, employee);
         await refreshSession();
-        showToast('Company logo updated.', 'success');
+        showToast(`${DEFAULT_COMPANIES[companyId].shortName} logo updated.`, 'success');
       } catch (err: unknown) {
         showToast(err instanceof Error ? err.message : 'Logo upload failed', 'error');
       }
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleResetCompanyLogo = async (companyId: CompanyId) => {
+    try {
+      const nextForm = buildUpdatedCompaniesForm(companyId, { logoAssetId: '' });
+      setForm(nextForm);
+      setCompanyLogoMap((prev) => ({ ...prev, [companyId]: '' }));
+      await saveCompanySettings(nextForm, employee);
+      await refreshSession();
+      showToast(`Reverted ${DEFAULT_COMPANIES[companyId].shortName} to built-in brand logo.`, 'info');
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Could not reset logo', 'error');
+    }
   };
 
   const toggleWorkingDay = (day: number) => {
@@ -321,107 +410,154 @@ export function SettingsView() {
         ))}
       </div>
 
-      {/* TAB 1: COMPANY PROFILE */}
+      {/* TAB 1: DUAL-COMPANY PROFILES (TALENTGRADE & MYGRADE) */}
       {tab === 'company' && (
-        <form
-          onSubmit={handleSaveSettings}
-          className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-5 max-w-3xl space-y-5 text-xs"
-        >
-          <div className="flex items-center gap-4 pb-4 border-b border-zinc-200 dark:border-zinc-800">
-            <TalentGradeLogo logoUrl={companyLogoUrl} companyName={form.companyName} compact />
-            <div className="space-y-1.5">
-              <div className="font-semibold text-sm">Company Logo (Appears on Payslips &amp; Portal)</div>
-              <label className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800 font-medium">
-                <Upload className="w-3.5 h-3.5" />
-                Upload Custom Logo (PNG/JPG, max 500 KB)
-                <input
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) handleLogoUpload(f);
-                  }}
-                />
-              </label>
-            </div>
+        <form onSubmit={handleSaveSettings} className="space-y-6 max-w-5xl text-xs">
+          <div className="grid lg:grid-cols-2 gap-6">
+            {COMPANY_IDS.map((cid) => {
+              const profile = normalizedCompanies[cid];
+              const isMyGrade = cid === 'mygrade';
+              const logoUrl = companyLogoMap[cid] || null;
+              return (
+                <div
+                  key={cid}
+                  className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-5 space-y-5"
+                >
+                  <div className="flex items-start justify-between gap-3 pb-4 border-b border-zinc-200 dark:border-zinc-800">
+                    <div className="space-y-1.5 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <TalentGradeLogo
+                          logoUrl={logoUrl}
+                          companyId={cid}
+                          companyName={profile.shortName}
+                        />
+                        <CompanyBadge companyId={cid} />
+                      </div>
+                      <p className="text-[11px] text-zinc-500">
+                        Supported payslip currencies:{' '}
+                        <span className="font-mono font-semibold text-zinc-800 dark:text-zinc-200">
+                          {isMyGrade ? 'INR only' : 'INR · AED'}
+                        </span>
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800 font-medium">
+                      <Upload className="w-3.5 h-3.5" />
+                      Upload {profile.shortName} Logo
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) handleCompanyLogoUpload(cid, f);
+                        }}
+                      />
+                    </label>
+                    {profile.logoAssetId && (
+                      <button
+                        type="button"
+                        onClick={() => handleResetCompanyLogo(cid)}
+                        className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                      >
+                        Use Built-in Brand Mark
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block font-medium mb-1">Legal Company Name *</label>
+                      <input
+                        required
+                        value={profile.legalName}
+                        onChange={(e) => updateCompanyProfile(cid, { legalName: e.target.value })}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block font-medium mb-1">Registered Address *</label>
+                      <textarea
+                        rows={2}
+                        required
+                        value={profile.address}
+                        onChange={(e) => updateCompanyProfile(cid, { address: e.target.value })}
+                        className="w-full py-2 px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                      />
+                    </div>
+
+                    <div className="grid sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-medium mb-1">Default Payslip Currency</label>
+                        <select
+                          disabled={isMyGrade}
+                          value={isMyGrade ? 'INR' : profile.defaultCurrency || 'INR'}
+                          onChange={(e) =>
+                            updateCompanyProfile(cid, {
+                              defaultCurrency: e.target.value as 'INR' | 'AED',
+                            })
+                          }
+                          className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono disabled:opacity-75"
+                        >
+                          <option value="INR">INR (₹)</option>
+                          {!isMyGrade && <option value="AED">AED (د.إ)</option>}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block font-medium mb-1">Company Email</label>
+                        <input
+                          value={profile.email || ''}
+                          onChange={(e) => updateCompanyProfile(cid, { email: e.target.value })}
+                          className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-medium mb-1">Company Phone</label>
+                        <input
+                          value={profile.phone || ''}
+                          onChange={(e) => updateCompanyProfile(cid, { phone: e.target.value })}
+                          className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-medium mb-1">Tax / Registration ID</label>
+                        <input
+                          value={profile.taxId || ''}
+                          onChange={(e) => updateCompanyProfile(cid, { taxId: e.target.value })}
+                          className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block font-medium mb-1">Website</label>
+                      <input
+                        value={profile.website || ''}
+                        onChange={(e) => updateCompanyProfile(cid, { website: e.target.value })}
+                        className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
+                      />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
-          <div className="grid sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block font-medium mb-1">Company Name</label>
-              <input
-                required
-                value={form.companyName}
-                onChange={(e) => setForm({ ...form, companyName: e.target.value })}
-                className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
-              />
-            </div>
-            <div>
-              <label className="block font-medium mb-1">Default Company Currency</label>
-              <select
-                value={form.currency}
-                onChange={(e) => setForm({ ...form, currency: e.target.value })}
-                className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
-              >
-                <option value="INR">INR (₹) — India</option>
-                <option value="AED">AED (د.إ) — Dubai, UAE</option>
-              </select>
-            </div>
-            <div>
-              <label className="block font-medium mb-1">Company Email</label>
-              <input
-                value={form.companyEmail}
-                onChange={(e) => setForm({ ...form, companyEmail: e.target.value })}
-                className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
-              />
-            </div>
-            <div>
-              <label className="block font-medium mb-1">Company Phone</label>
-              <input
-                value={form.companyPhone}
-                onChange={(e) => setForm({ ...form, companyPhone: e.target.value })}
-                className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
-              />
-            </div>
-            <div>
-              <label className="block font-medium mb-1">Website</label>
-              <input
-                value={form.companyWebsite}
-                onChange={(e) => setForm({ ...form, companyWebsite: e.target.value })}
-                className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
-              />
-            </div>
-            <div>
-              <label className="block font-medium mb-1">Tax / Registration ID</label>
-              <input
-                value={form.taxId}
-                onChange={(e) => setForm({ ...form, taxId: e.target.value })}
-                className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
-              />
-            </div>
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-4">
+            <span className="text-[11px] text-zinc-500">
+              Operating locations: {(form.locations || ['India', 'Dubai, UAE']).join(' · ')}
+            </span>
+            <button
+              type="submit"
+              disabled={saving}
+              className="min-h-[44px] px-6 py-2.5 rounded-xl bg-[#B5121B] hover:bg-[#960E16] text-white font-semibold"
+            >
+              {saving ? 'Saving...' : 'Save Company Profiles'}
+            </button>
           </div>
-
-          <div>
-            <label className="block font-medium mb-1">Registered Locations &amp; Address</label>
-            <input
-              value={form.companyAddress}
-              onChange={(e) => setForm({ ...form, companyAddress: e.target.value })}
-              className="w-full min-h-[40px] px-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950"
-            />
-            <p className="text-[11px] text-zinc-500 mt-1">
-              Operating offices: {(form.locations || ['India', 'Dubai, UAE']).join(' · ')} | Currencies:{' '}
-              {(form.supportedCurrencies || ['INR', 'AED']).join(' · ')}
-            </p>
-          </div>
-
-          <button
-            type="submit"
-            disabled={saving}
-            className="min-h-[44px] px-6 py-2.5 rounded-xl bg-[#B5121B] hover:bg-[#960E16] text-white font-semibold"
-          >
-            {saving ? 'Saving...' : 'Save Company Profile'}
-          </button>
         </form>
       )}
 

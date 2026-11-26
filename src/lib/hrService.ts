@@ -30,7 +30,10 @@ import {
   AttendanceRecord,
   AttendanceStatus,
   AuditLog,
+  CompanyId,
+  CompanyIdentityOverride,
   CompanySettings,
+  DEFAULT_COMPANIES,
   Department,
   Employee,
   EmployeeSalary,
@@ -45,6 +48,11 @@ import {
   PayrollStatus,
   SalaryLineItem,
   UserRole,
+  assertCurrencyAllowedForCompany,
+  enforceCompanyCurrency,
+  normalizeCompaniesMap,
+  normalizeCompanyId,
+  resolveCompanyProfile,
 } from '../types/hr';
 import {
   calculateCasualLeaveEligibilityDate,
@@ -88,12 +96,17 @@ export const LOCATION_PRESETS: Record<
 };
 
 export function getEffectiveSchedule(emp: Employee, settings: CompanySettings) {
+  const companyId = normalizeCompanyId(emp.companyId);
   const loc = emp.location || 'India';
   const preset = LOCATION_PRESETS[loc] || LOCATION_PRESETS.India;
   return {
+    companyId,
     location: loc,
     timezone: emp.timezone || preset.timezone,
-    currency: emp.currency || preset.currency || settings.currency || 'INR',
+    currency: enforceCompanyCurrency(
+      companyId,
+      emp.currency || preset.currency || settings.currency || 'INR'
+    ),
     officeStartTime: emp.officeStartTime || settings.officeStartTime || '09:30',
     officeEndTime: emp.officeEndTime || settings.officeEndTime || '18:30',
     gracePeriodMinutes:
@@ -281,7 +294,11 @@ export async function getCompanySettings(): Promise<CompanySettings | null> {
   try {
     const snap = await getDoc(doc(db, 'companySettings', 'main'));
     if (!snap.exists()) return null;
-    return snap.data() as CompanySettings;
+    const raw = snap.data() as CompanySettings;
+    return {
+      ...raw,
+      companies: normalizeCompaniesMap(raw),
+    };
   } catch (err) {
     handleFirestoreError(err, OperationType.GET, 'companySettings/main');
   }
@@ -293,10 +310,12 @@ export async function saveCompanySettings(
 ): Promise<void> {
   try {
     const existing = await getCompanySettings();
+    const normalizedCompanies = normalizeCompaniesMap(settings);
     await setDoc(
       doc(db, 'companySettings', 'main'),
       cleanObject({
         ...settings,
+        companies: normalizedCompanies,
         celebrationSettings: normalizeCelebrationSettings(settings.celebrationSettings),
         attendanceReminders: normalizeAttendanceReminderSettings(settings.attendanceReminders),
         locations: settings.locations || ['India', 'Dubai, UAE'],
@@ -311,8 +330,13 @@ export async function saveCompanySettings(
       entityType: 'CompanySettings',
       entityId: 'main',
       previousValues: existing ? { companyName: existing.companyName, officeStartTime: existing.officeStartTime } : undefined,
-      updatedValues: { companyName: settings.companyName, officeStartTime: settings.officeStartTime },
-      summary: `${actor.fullName} updated TalentGrade company settings and attendance rules.`,
+      updatedValues: {
+        companyName: settings.companyName,
+        officeStartTime: settings.officeStartTime,
+        talentgradeLegalName: normalizedCompanies.talentgrade.legalName,
+        mygradeLegalName: normalizedCompanies.mygrade.legalName,
+      },
+      summary: `${actor.fullName} updated TalentGrade & MyGrade company settings and attendance rules.`,
     });
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, 'companySettings/main');
@@ -378,11 +402,12 @@ export async function bootstrapCompanyAndAdmin(user: User): Promise<{
   if (!settings) {
     const defaultSettings: Omit<CompanySettings, 'updatedAt'> = {
       companyName: 'TalentGrade',
-      companyAddress: 'India & Dubai, UAE Operations',
+      companyAddress: DEFAULT_COMPANIES.talentgrade.address,
       companyPhone: '',
       companyEmail: email,
       companyWebsite: 'https://talentgrade.io',
       taxId: '',
+      companies: DEFAULT_COMPANIES,
       locations: ['India', 'Dubai, UAE'],
       supportedCurrencies: ['INR', 'AED'],
       officeStartTime: '09:30',
@@ -416,13 +441,15 @@ export async function bootstrapCompanyAndAdmin(user: User): Promise<{
     settings.companyName === 'Meridian Internal Operations' ||
     !settings.leavePolicy ||
     !settings.celebrationSettings ||
-    !settings.attendanceReminders
+    !settings.attendanceReminders ||
+    !settings.companies
   ) {
     // Non-destructive upgrade: preserve all existing settings and add defaults if missing
     const upgraded: Omit<CompanySettings, 'updatedAt'> = {
       ...settings,
       companyName:
         settings.companyName === 'Meridian Internal Operations' ? 'TalentGrade' : settings.companyName,
+      companies: normalizeCompaniesMap(settings),
       locations: settings.locations || ['India', 'Dubai, UAE'],
       supportedCurrencies: settings.supportedCurrencies || ['INR', 'AED'],
       currency: settings.currency === 'USD' ? 'INR' : settings.currency,
@@ -464,6 +491,7 @@ export async function bootstrapCompanyAndAdmin(user: User): Promise<{
     const policy = normalizeLeavePolicyConfig(settings.leavePolicy);
     const newEmp: Omit<Employee, 'id' | 'createdAt' | 'updatedAt'> = {
       uid: user.uid,
+      companyId: 'talentgrade',
       employeeCode: 'TG-001',
       fullName: user.displayName || 'Super Admin',
       email,
@@ -494,13 +522,25 @@ export async function bootstrapCompanyAndAdmin(user: User): Promise<{
     });
     employee = { id: empId, ...newEmp };
   } else {
-    employee = { id: empSnap.id, ...(empSnap.data() as Omit<Employee, 'id'>) };
+    const rawEmp = empSnap.data() as Omit<Employee, 'id'>;
+    employee = {
+      id: empSnap.id,
+      ...rawEmp,
+      companyId: normalizeCompanyId(rawEmp.companyId),
+    };
+    const pendingPatch: Record<string, unknown> = {};
     if (employee.uid !== user.uid) {
+      pendingPatch.uid = user.uid;
+      employee.uid = user.uid;
+    }
+    if (!rawEmp.companyId) {
+      pendingPatch.companyId = 'talentgrade';
+    }
+    if (Object.keys(pendingPatch).length > 0) {
       await updateDoc(doc(db, 'employees', empId), {
-        uid: user.uid,
+        ...pendingPatch,
         updatedAt: serverTimestamp(),
       });
-      employee.uid = user.uid;
     }
   }
 
@@ -528,12 +568,14 @@ export async function resolveEmployeeSession(user: User): Promise<{
     let emp: Employee | null = null;
     if (!byUidSnap.empty) {
       const d = byUidSnap.docs[0];
-      emp = { id: d.id, ...(d.data() as Omit<Employee, 'id'>) };
+      const raw = d.data() as Omit<Employee, 'id'>;
+      emp = { id: d.id, ...raw, companyId: normalizeCompanyId(raw.companyId) };
     } else if (email && user.emailVerified) {
       const byEmailSnap = await getDocs(query(collection(db, 'employees'), where('email', '==', email)));
       if (!byEmailSnap.empty) {
         const d = byEmailSnap.docs[0];
-        emp = { id: d.id, ...(d.data() as Omit<Employee, 'id'>) };
+        const raw = d.data() as Omit<Employee, 'id'>;
+        emp = { id: d.id, ...raw, companyId: normalizeCompanyId(raw.companyId) };
       }
     }
 
@@ -725,25 +767,66 @@ export async function fetchAllEmployees(
 ): Promise<Employee[]> {
   try {
     const byId = new Map<string, Employee>();
+    const missingCompanyIds: string[] = [];
+    const registerDoc = (id: string, raw: Omit<Employee, 'id'>) => {
+      if (!raw.companyId) {
+        missingCompanyIds.push(id);
+      }
+      byId.set(id, {
+        id,
+        ...raw,
+        companyId: normalizeCompanyId(raw.companyId),
+      });
+    };
+
     if (
       currentEmployee.role === 'super_admin' ||
       (currentEmployee.role === 'team_leader' && canViewAll)
     ) {
       const snap = await getDocs(collection(db, 'employees'));
-      snap.docs.forEach((d) => byId.set(d.id, { id: d.id, ...(d.data() as Omit<Employee, 'id'>) }));
+      snap.docs.forEach((d) => registerDoc(d.id, d.data() as Omit<Employee, 'id'>));
     } else if (currentEmployee.role === 'team_leader') {
       const [selfSnap, teamSnap] = await Promise.all([
         getDocs(query(collection(db, 'employees'), where('uid', '==', currentEmployee.uid))),
         getDocs(query(collection(db, 'employees'), where('managerUid', '==', currentEmployee.uid))),
       ]);
-      selfSnap.docs.forEach((d) => byId.set(d.id, { id: d.id, ...(d.data() as Omit<Employee, 'id'>) }));
-      teamSnap.docs.forEach((d) => byId.set(d.id, { id: d.id, ...(d.data() as Omit<Employee, 'id'>) }));
+      selfSnap.docs.forEach((d) => registerDoc(d.id, d.data() as Omit<Employee, 'id'>));
+      teamSnap.docs.forEach((d) => registerDoc(d.id, d.data() as Omit<Employee, 'id'>));
     } else {
       const snap = await getDocs(
         query(collection(db, 'employees'), where('uid', '==', currentEmployee.uid))
       );
-      snap.docs.forEach((d) => byId.set(d.id, { id: d.id, ...(d.data() as Omit<Employee, 'id'>) }));
+      snap.docs.forEach((d) => registerDoc(d.id, d.data() as Omit<Employee, 'id'>));
     }
+
+    // Safe non-destructive backfill: ONLY adds missing companyId: 'talentgrade' when Super Admin views directory.
+    // Never overwrites existing companyId, never alters UID, roles, leave balances, or auth records.
+    if (currentEmployee.role === 'super_admin' && missingCompanyIds.length > 0) {
+      try {
+        for (let i = 0; i < missingCompanyIds.length; i += 400) {
+          const chunk = missingCompanyIds.slice(i, i + 400);
+          const batch = writeBatch(db);
+          chunk.forEach((empDocId) => {
+            batch.update(doc(db, 'employees', empDocId), {
+              companyId: 'talentgrade',
+              updatedAt: serverTimestamp(),
+            });
+          });
+          await batch.commit();
+        }
+        await writeAuditLog({
+          actor: currentEmployee,
+          action: 'BACKFILL_EMPLOYEE_COMPANY',
+          entityType: 'Employee',
+          entityId: 'batch_talentgrade_default',
+          updatedValues: { count: missingCompanyIds.length, defaultCompanyId: 'talentgrade' },
+          summary: `Safely assigned default TalentGrade company to ${missingCompanyIds.length} existing employee record(s) missing companyId.`,
+        }).catch(() => {});
+      } catch (backfillErr) {
+        console.warn('Non-destructive companyId backfill skipped:', backfillErr);
+      }
+    }
+
     return Array.from(byId.values()).sort((a, b) => a.employeeCode.localeCompare(b.employeeCode));
   } catch (err) {
     handleFirestoreError(err, OperationType.LIST, 'employees');
@@ -752,6 +835,7 @@ export async function fetchAllEmployees(
 
 export async function createEmployeeAccount(
   input: {
+    companyId: CompanyId;
     employeeCode: string;
     fullName: string;
     email: string;
@@ -785,6 +869,8 @@ export async function createEmployeeAccount(
   options?: { leavePolicy?: LeavePolicyConfig }
 ): Promise<{ employee: Employee; authProvisioned: boolean; note?: string }> {
   const id = makeSafeId('emp');
+  const normalizedCompanyId = normalizeCompanyId(input.companyId);
+  const safeCurrency = assertCurrencyAllowedForCompany(normalizedCompanyId, input.currency || 'INR');
   const normalizedEmail = input.email.trim().toLowerCase();
   if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
     throw new Error('Please enter a valid corporate email address.');
@@ -882,6 +968,7 @@ export async function createEmployeeAccount(
 
     const empData = cleanObject({
       uid: provisionedUid,
+      companyId: normalizedCompanyId,
       employeeCode: input.employeeCode.trim().toUpperCase(),
       fullName: input.fullName.trim(),
       email: normalizedEmail,
@@ -896,7 +983,7 @@ export async function createEmployeeAccount(
       status: 'Active' as EmployeeStatus,
       location: input.location || 'India',
       timezone: input.timezone || 'Asia/Kolkata',
-      currency: input.currency || 'INR',
+      currency: safeCurrency,
       officeStartTime: input.officeStartTime || undefined,
       officeEndTime: input.officeEndTime || undefined,
       gracePeriodMinutes:
@@ -1043,6 +1130,7 @@ export async function createEmployeeAccount(
       entityType: 'Employee',
       entityId: id,
       updatedValues: {
+        companyId: normalizedCompanyId,
         employeeCode: empData.employeeCode,
         fullName: empData.fullName,
         email: normalizedEmail,
@@ -1052,7 +1140,7 @@ export async function createEmployeeAccount(
         clEligibilityDate,
         authProvisioned,
       },
-      summary: `Created employee account for ${empData.fullName} (${empData.employeeCode}) in ${empData.location} (${empData.currency})`,
+      summary: `Created ${normalizedCompanyId === 'mygrade' ? 'MyGrade' : 'TalentGrade'} employee account for ${empData.fullName} (${empData.employeeCode}) in ${empData.location} (${empData.currency})`,
     });
 
     return {
@@ -1066,7 +1154,8 @@ export async function createEmployeeAccount(
       (err.message.includes('already exists') ||
         err.message.includes('Firebase Authentication') ||
         err.message.includes('valid') ||
-        err.message.includes('required'))
+        err.message.includes('required') ||
+        err.message.includes('INR'))
     ) {
       throw err;
     }
@@ -1093,8 +1182,22 @@ export async function updateEmployeeProfile(
         ? calculateCasualLeaveEligibilityDate(updates.joiningDate, policyEligibilityMonths)
         : undefined;
 
+    const nextCompanyId = normalizeCompanyId(updates.companyId ?? prev.companyId);
+    const requestedCurrency =
+      updates.currency !== undefined
+        ? updates.currency
+        : updates.companyId === 'mygrade' && prev.currency === 'AED'
+          ? 'INR'
+          : prev.currency || 'INR';
+    const validatedCurrency = assertCurrencyAllowedForCompany(nextCompanyId, requestedCurrency);
+
     const safeUpdates: Record<string, unknown> = cleanObject({
       ...updates,
+      ...(updates.companyId !== undefined ? { companyId: nextCompanyId } : {}),
+      ...(updates.currency !== undefined ||
+      (updates.companyId === 'mygrade' && prev.currency && prev.currency !== 'INR')
+        ? { currency: validatedCurrency }
+        : {}),
       ...(computedEligibility ? { clEligibilityDate: computedEligibility } : {}),
       email: updates.email ? updates.email.trim().toLowerCase() : undefined,
       updatedAt: serverTimestamp(),
@@ -1295,6 +1398,7 @@ export async function updateEmployeeProfile(
       entityType: 'Employee',
       entityId: employeeId,
       previousValues: {
+        companyId: normalizeCompanyId(prev.companyId),
         role: prev.role,
         status: prev.status,
         location: prev.location || 'India',
@@ -1303,16 +1407,20 @@ export async function updateEmployeeProfile(
         casualLeaveBalance: prev.casualLeaveBalance,
       },
       updatedValues: cleanObject({
+        companyId: updates.companyId ? normalizeCompanyId(updates.companyId) : undefined,
         role: updates.role,
         status: updates.status,
         location: updates.location,
-        currency: updates.currency,
+        currency: safeUpdates.currency as string | undefined,
         sickLeaveBalance: updates.sickLeaveBalance,
         casualLeaveBalance: updates.casualLeaveBalance,
       }),
       summary: `Updated employee ${prev.fullName} (${prev.employeeCode})`,
     });
   } catch (err) {
+    if (err instanceof Error && (err.message.includes('INR') || err.message.includes('currency'))) {
+      throw err;
+    }
     handleFirestoreError(err, OperationType.UPDATE, `employees/${employeeId}`);
   }
 }
@@ -2402,7 +2510,11 @@ export async function saveEmployeeSalary(
     professionalTax +
     safeDeductions.reduce((sum, i) => sum + i.amount, 0);
   const netSalary = gross - totalDed;
-  const currency = params.currency || params.employee.currency || 'INR';
+  const employeeCompanyId = normalizeCompanyId(params.employee.companyId);
+  const currency = assertCurrencyAllowedForCompany(
+    employeeCompanyId,
+    params.currency || params.employee.currency || 'INR'
+  );
 
   const payload = {
     employeeId: params.employee.id,
@@ -2426,7 +2538,12 @@ export async function saveEmployeeSalary(
       action: 'UPDATE_SALARY_CONFIG',
       entityType: 'EmployeeSalary',
       entityId: params.employee.id,
-      updatedValues: { currency, basicSalary: payload.basicSalary, netSalary: payload.netSalary },
+      updatedValues: {
+        companyId: employeeCompanyId,
+        currency,
+        basicSalary: payload.basicSalary,
+        netSalary: payload.netSalary,
+      },
       summary: `Updated salary configuration for ${params.employee.fullName} (Net: ${currency} ${netSalary})`,
     });
     return { id: params.employee.id, ...payload };
@@ -2474,6 +2591,8 @@ export async function savePayrollRecord(
     status: PayrollStatus;
     notes?: string;
     revisionReason?: string;
+    settings?: CompanySettings | null;
+    companyOverride?: CompanyIdentityOverride | null;
   },
   actor: Employee
 ): Promise<PayrollRecord> {
@@ -2526,7 +2645,15 @@ export async function savePayrollRecord(
     professionalTax +
     safeDeductions.reduce((s, x) => s + x.amount, 0);
   const netSalary = grossEarnings - totalDeductions;
-  const currency = params.currency || params.employee.currency || 'INR';
+
+  const employeeCompanyId = normalizeCompanyId(params.employee.companyId);
+  const effectiveOverride = params.companyOverride?.companyOverridden ? params.companyOverride : null;
+  const resolvedCompany = resolveCompanyProfile(employeeCompanyId, params.settings, effectiveOverride);
+
+  // Enforce INR-only for MyGrade employees AND MyGrade payslips
+  const requestedCurrency = params.currency || params.employee.currency || 'INR';
+  assertCurrencyAllowedForCompany(employeeCompanyId, requestedCurrency);
+  const currency = assertCurrencyAllowedForCompany(resolvedCompany.companyId, requestedCurrency);
 
   try {
     const existingSnap = await getDoc(doc(db, 'payrollRecords', id));
@@ -2536,6 +2663,8 @@ export async function savePayrollRecord(
       throw new Error('A revision reason is required to modify finalized or published payroll.');
     }
 
+    const generatedAtIso = prev?.generatedAtIso || new Date().toISOString();
+
     const payload = cleanObject({
       employeeId: params.employee.id,
       employeeUid: params.employee.uid || '',
@@ -2543,6 +2672,12 @@ export async function savePayrollRecord(
       employeeCode: params.employee.employeeCode,
       designation: params.employee.designation,
       department: params.employee.department,
+      companyId: resolvedCompany.companyId,
+      companyName: resolvedCompany.legalName.slice(0, 160),
+      companyAddress: resolvedCompany.address.slice(0, 300),
+      companyLogoAssetId: resolvedCompany.logoAssetId.slice(0, 128),
+      companyOverridden: resolvedCompany.isOverridden,
+      generatedAtIso,
       location: params.employee.location || 'India',
       currency,
       month: params.month,
@@ -2573,25 +2708,144 @@ export async function savePayrollRecord(
       action: prev ? `PAYROLL_UPDATE_${params.status.toUpperCase()}` : `PAYROLL_CREATE_${params.status.toUpperCase()}`,
       entityType: 'PayrollRecord',
       entityId: id,
-      previousValues: prev ? { status: prev.status, netSalary: prev.netSalary, currency: prev.currency || 'INR' } : undefined,
-      updatedValues: { status: params.status, netSalary, currency, revisionReason: params.revisionReason || '' },
-      summary: `${params.status} payroll for ${params.employee.fullName} (${params.month}) · Net ${currency} ${netSalary}${params.revisionReason ? ` · Reason: ${params.revisionReason}` : ''}`,
+      previousValues: prev
+        ? {
+            status: prev.status,
+            netSalary: prev.netSalary,
+            currency: prev.currency || 'INR',
+            companyId: prev.companyId || employeeCompanyId,
+          }
+        : undefined,
+      updatedValues: {
+        status: params.status,
+        netSalary,
+        currency,
+        companyId: resolvedCompany.companyId,
+        companyOverridden: resolvedCompany.isOverridden,
+        revisionReason: params.revisionReason || '',
+      },
+      summary: `${params.status} ${resolvedCompany.shortName} payroll for ${params.employee.fullName} (${params.month}) · Net ${currency} ${netSalary}${resolvedCompany.isOverridden ? ' [Company Override]' : ''}${params.revisionReason ? ` · Reason: ${params.revisionReason}` : ''}`,
     });
 
     return { id, ...(payload as Omit<PayrollRecord, 'id'>) };
   } catch (err) {
-    if (err instanceof Error && err.message.includes('revision reason')) throw err;
+    if (
+      err instanceof Error &&
+      (err.message.includes('revision reason') ||
+        err.message.includes('INR') ||
+        err.message.includes('currency'))
+    ) {
+      throw err;
+    }
     handleFirestoreError(err, OperationType.WRITE, `payrollRecords/${id}`);
   }
+}
+
+export async function bulkGeneratePayrollRecords(
+  params: {
+    employees: Employee[];
+    salaries: EmployeeSalary[];
+    existingPayrolls: PayrollRecord[];
+    attendance: AttendanceRecord[];
+    settings: CompanySettings;
+    month: string;
+    status: PayrollStatus;
+    companyFilter: 'all' | CompanyId;
+  },
+  actor: Employee
+): Promise<{
+  generatedCount: number;
+  skippedExistingCount: number;
+  skippedNoSalaryNames: string[];
+}> {
+  const [yr, mo] = params.month.split('-').map(Number);
+  const daysTotal = new Date(yr, mo, 0).getDate();
+  const targetEmployees = params.employees.filter((emp) => {
+    if (emp.status !== 'Active') return false;
+    if (params.companyFilter !== 'all' && normalizeCompanyId(emp.companyId) !== params.companyFilter) {
+      return false;
+    }
+    return true;
+  });
+
+  let generatedCount = 0;
+  let skippedExistingCount = 0;
+  const skippedNoSalaryNames: string[] = [];
+
+  for (const emp of targetEmployees) {
+    const existing = params.existingPayrolls.find(
+      (p) => p.employeeId === emp.id && p.month === params.month
+    );
+    if (existing && existing.status !== 'Draft') {
+      skippedExistingCount++;
+      continue;
+    }
+
+    const sal = params.salaries.find((s) => s.employeeId === emp.id);
+    if (!sal) {
+      skippedNoSalaryNames.push(emp.fullName);
+      continue;
+    }
+
+    const effective = getEffectiveSchedule(emp, params.settings);
+    const empWorkingDays = effective.workingDays || params.settings.workingDays || [1, 2, 3, 4, 5];
+    let workingDaysInMonth = 0;
+    for (let d = 1; d <= daysTotal; d++) {
+      const dow = new Date(Date.UTC(yr, mo - 1, d)).getUTCDay();
+      if (empWorkingDays.includes(dow)) workingDaysInMonth++;
+    }
+
+    const monthAtt = params.attendance.filter(
+      (a) => a.employeeId === emp.id && a.date.startsWith(params.month)
+    );
+    const presentDays = monthAtt.filter((a) => a.status === 'Present' || a.status === 'Late').length;
+    const leaveDays = monthAtt.filter((a) => a.status === 'Leave').length;
+
+    const currency = enforceCompanyCurrency(
+      effective.companyId,
+      sal.currency || effective.currency
+    );
+
+    await savePayrollRecord(
+      {
+        employee: emp,
+        month: params.month,
+        currency,
+        basicSalary: sal.basicSalary,
+        hra: sal.hra,
+        otherEarnings: sal.otherEarnings || [],
+        bonus: sal.defaultBonus || 0,
+        deductions: sal.deductions || [],
+        professionalTax: sal.professionalTax || 0,
+        workingDaysInMonth,
+        presentDays,
+        leaveDays,
+        status: params.status,
+        settings: params.settings,
+      },
+      actor
+    );
+    generatedCount++;
+  }
+
+  return { generatedCount, skippedExistingCount, skippedNoSalaryNames };
 }
 
 export async function generatePayslipPdfBlob(payslip: PayrollRecord, settings: CompanySettings | null): Promise<Blob> {
   const user = auth.currentUser;
   if (!user) throw new Error('Not authenticated');
 
+  const resolvedCompany = resolveCompanyProfile(payslip.companyId, settings, {
+    companyId: payslip.companyId,
+    companyName: payslip.companyName,
+    companyAddress: payslip.companyAddress,
+    companyLogoAssetId: payslip.companyLogoAssetId,
+    companyOverridden: payslip.companyOverridden,
+  });
+
   let logoDataUrl: string | undefined;
-  if (settings?.logoAssetId) {
-    const logoAsset = await fetchMediaAsset(settings.logoAssetId);
+  if (resolvedCompany.logoAssetId) {
+    const logoAsset = await fetchMediaAsset(resolvedCompany.logoAssetId);
     logoDataUrl = logoAsset?.dataUrl;
   }
 

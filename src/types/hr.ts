@@ -52,6 +52,27 @@ export {
   type ReminderType,
 } from '../../shared/attendanceReminderEngine';
 
+export {
+  COMPANY_IDS,
+  DEFAULT_COMPANIES,
+  DEFAULT_COMPANY_ADDRESS,
+  assertCurrencyAllowedForCompany,
+  enforceCompanyCurrency,
+  getAllowedCurrenciesForCompany,
+  getCompanyShortName,
+  isCurrencyAllowedForCompany,
+  isValidCompanyId,
+  normalizeCompaniesMap,
+  normalizeCompanyId,
+  resolveCompanyProfile,
+  type CompanyId,
+  type CompanyIdentityOverride,
+  type CompanyProfileConfig,
+  type ResolvedCompanyIdentity,
+  type SupportedCurrency,
+} from '../../shared/companyConfig';
+
+import type { CompanyId, CompanyProfileConfig } from '../../shared/companyConfig';
 import type { LeavePolicyConfig, LeaveType } from '../../shared/leaveAccrualEngine';
 import type {
   CelebrationSettings,
@@ -91,6 +112,7 @@ export interface CompanySettings {
   companyWebsite?: string;
   taxId?: string;
   logoAssetId?: string;
+  companies?: Partial<Record<CompanyId, CompanyProfileConfig>>;
   locations?: string[];
   supportedCurrencies?: string[];
   officeStartTime: string; // HH:mm
@@ -122,6 +144,7 @@ export interface Department {
 export interface Employee {
   id: string;
   uid: string;
+  companyId?: CompanyId;
   employeeCode: string;
   fullName: string;
   email: string;
@@ -334,6 +357,12 @@ export interface PayrollRecord {
   employeeCode: string;
   designation: string;
   department: string;
+  companyId?: CompanyId;
+  companyName?: string;
+  companyAddress?: string;
+  companyLogoAssetId?: string;
+  companyOverridden?: boolean;
+  generatedAtIso?: string;
   location?: string;
   currency?: string;
   month: string; // YYYY-MM

@@ -85,7 +85,7 @@ service cloud.firestore {
         ]) &&
         data.keys().hasOnly([
           'companyName', 'companyAddress', 'companyPhone', 'companyEmail', 'companyWebsite',
-          'taxId', 'logoAssetId', 'locations', 'supportedCurrencies',
+          'taxId', 'logoAssetId', 'companies', 'locations', 'supportedCurrencies',
           'officeStartTime', 'officeEndTime', 'gracePeriodMinutes',
           'halfDayMinHours', 'fullDayMinHours', 'workingDays', 'holidays',
           'defaultSickLeave', 'defaultCasualLeave', 'leavePolicy', 'celebrationSettings', 'attendanceReminders', 'currency', 'teamLeaderPermissions',
@@ -98,6 +98,7 @@ service cloud.firestore {
         isOptionalStringSize(data, 'companyWebsite', 160) &&
         isOptionalStringSize(data, 'taxId', 80) &&
         isOptionalStringSize(data, 'logoAssetId', 128) &&
+        (!( 'companies' in data ) || data.companies is map) &&
         (!( 'locations' in data ) || (data.locations is list && data.locations.size() <= 20)) &&
         (!( 'supportedCurrencies' in data ) || (data.supportedCurrencies is list && data.supportedCurrencies.size() <= 10)) &&
         isStringSize(data.officeStartTime, 5, 5) &&
@@ -146,7 +147,7 @@ service cloud.firestore {
           'failedLoginAttempts', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'uid', 'employeeCode', 'fullName', 'email', 'phone', 'emergencyContact',
+          'uid', 'companyId', 'employeeCode', 'fullName', 'email', 'phone', 'emergencyContact',
           'role', 'department', 'designation', 'joiningDate', 'dateOfBirth', 'birthdayMonthDay', 'status',
           'location', 'timezone', 'currency',
           'officeStartTime', 'officeEndTime', 'gracePeriodMinutes',
@@ -158,6 +159,7 @@ service cloud.firestore {
           'lockedUntil', 'createdAt', 'updatedAt'
         ]) &&
         data.uid is string && data.uid.size() <= 128 &&
+        (!( 'companyId' in data ) || data.companyId in ['talentgrade', 'mygrade']) &&
         isStringSize(data.employeeCode, 1, 40) &&
         isStringSize(data.fullName, 1, 120) &&
         isStringSize(data.email, 3, 120) &&
@@ -173,6 +175,7 @@ service cloud.firestore {
         isOptionalStringSize(data, 'location', 80) &&
         isOptionalStringSize(data, 'timezone', 80) &&
         isOptionalStringSize(data, 'currency', 10) &&
+        (!( 'companyId' in data ) || data.companyId != 'mygrade' || !( 'currency' in data ) || data.currency == 'INR') &&
         isOptionalStringSize(data, 'officeStartTime', 5) &&
         isOptionalStringSize(data, 'officeEndTime', 5) &&
         (!( 'gracePeriodMinutes' in data ) || (data.gracePeriodMinutes is number && data.gracePeriodMinutes >= 0 && data.gracePeriodMinutes <= 180)) &&
@@ -447,7 +450,8 @@ service cloud.firestore {
         ]) &&
         data.keys().hasOnly([
           'employeeId', 'employeeUid', 'employeeName', 'employeeCode', 'designation',
-          'department', 'location', 'currency', 'month', 'basicSalary', 'hra', 'otherEarnings', 'bonus',
+          'department', 'companyId', 'companyName', 'companyAddress', 'companyLogoAssetId',
+          'companyOverridden', 'generatedAtIso', 'location', 'currency', 'month', 'basicSalary', 'hra', 'otherEarnings', 'bonus',
           'deductions', 'professionalTax', 'grossEarnings', 'totalDeductions', 'netSalary',
           'workingDaysInMonth', 'presentDays', 'leaveDays', 'status', 'notes',
           'createdBy', 'createdAt', 'updatedAt', 'publishedAt'
@@ -458,8 +462,15 @@ service cloud.firestore {
         isStringSize(data.employeeCode, 1, 40) &&
         isStringSize(data.designation, 1, 80) &&
         isStringSize(data.department, 1, 80) &&
+        (!( 'companyId' in data ) || data.companyId in ['talentgrade', 'mygrade']) &&
+        isOptionalStringSize(data, 'companyName', 160) &&
+        isOptionalStringSize(data, 'companyAddress', 300) &&
+        isOptionalStringSize(data, 'companyLogoAssetId', 128) &&
+        (!( 'companyOverridden' in data ) || data.companyOverridden is bool) &&
+        isOptionalStringSize(data, 'generatedAtIso', 40) &&
         isOptionalStringSize(data, 'location', 80) &&
         isOptionalStringSize(data, 'currency', 10) &&
+        (!( 'companyId' in data ) || data.companyId != 'mygrade' || !( 'currency' in data ) || data.currency == 'INR') &&
         isStringSize(data.month, 7, 7) &&
         data.basicSalary is number && data.basicSalary >= 0 &&
         data.hra is number && data.hra >= 0 &&

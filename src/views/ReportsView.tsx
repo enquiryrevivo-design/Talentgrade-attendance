@@ -4,11 +4,15 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../components/Toast';
 import {
   AttendanceRecord,
+  CompanyId,
   Department,
   Employee,
+  getCompanyShortName,
   LeaveApplication,
+  normalizeCompanyId,
   PayrollRecord,
 } from '../types/hr';
+import { CompanyBadge } from '../components/CompanyBadge';
 import {
   exportToCsv,
   fetchAllEmployees,
@@ -30,7 +34,7 @@ export function ReportsView() {
   const todayStr = getTodayInTimezone(
     employee && settings ? getEffectiveSchedule(employee, settings).timezone : 'Asia/Kolkata'
   );
-  const [category, setCategory] = useState<'attendance' | 'leave' | 'payroll'>('attendance');
+  const [category, setCategory] = useState<'attendance' | 'leave' | 'payroll' | 'employees'>('attendance');
   const [attReportType, setAttReportType] = useState<
     'daily' | 'monthly' | 'employee' | 'late' | 'absent' | 'half_day' | 'incomplete'
   >('monthly');
@@ -38,6 +42,7 @@ export function ReportsView() {
 
   const [monthFilter, setMonthFilter] = useState(todayStr.slice(0, 7));
   const [dateFilter, setDateFilter] = useState(todayStr);
+  const [companyFilter, setCompanyFilter] = useState<'all' | CompanyId>('all');
   const [deptFilter, setDeptFilter] = useState('all');
   const [locationFilter, setLocationFilter] = useState('all');
 
@@ -88,19 +93,31 @@ export function ReportsView() {
   const availableLocations =
     settings.locations && settings.locations.length > 0 ? settings.locations : ['India', 'Dubai, UAE'];
 
+  const employeeCompanyMap = employees.reduce<Record<string, CompanyId>>((acc, e) => {
+    acc[e.id] = normalizeCompanyId(e.companyId);
+    return acc;
+  }, {});
+
   const matchesEmpLocation = (empId: string) => {
     if (locationFilter === 'all') return true;
     const emp = employees.find((e) => e.id === empId);
     return (emp?.location || 'India') === locationFilter;
   };
 
+  const matchesEmpCompany = (empId: string) => {
+    if (companyFilter === 'all') return true;
+    return (employeeCompanyMap[empId] || 'talentgrade') === companyFilter;
+  };
+
   const deptEmployees = employees.filter((e) => {
+    if (companyFilter !== 'all' && normalizeCompanyId(e.companyId) !== companyFilter) return false;
     if (deptFilter !== 'all' && e.department !== deptFilter) return false;
     if (locationFilter !== 'all' && (e.location || 'India') !== locationFilter) return false;
     return true;
   });
 
   const filteredAtt = attendance.filter((r) => {
+    if (!matchesEmpCompany(r.employeeId)) return false;
     if (deptFilter !== 'all' && r.department !== deptFilter) return false;
     if (!matchesEmpLocation(r.employeeId)) return false;
     if (attReportType === 'daily') return r.date === dateFilter;
@@ -130,6 +147,7 @@ export function ReportsView() {
   });
 
   const filteredLeaves = leaves.filter((l) => {
+    if (!matchesEmpCompany(l.employeeId)) return false;
     if (deptFilter !== 'all' && l.department !== deptFilter) return false;
     if (!matchesEmpLocation(l.employeeId)) return false;
     return true;
@@ -137,6 +155,8 @@ export function ReportsView() {
 
   const filteredPayrolls = payrolls.filter((p) => {
     if (p.month !== monthFilter) return false;
+    const pCompany = normalizeCompanyId(p.companyId || employeeCompanyMap[p.employeeId]);
+    if (companyFilter !== 'all' && pCompany !== companyFilter) return false;
     if (deptFilter !== 'all' && p.department !== deptFilter) return false;
     if (locationFilter !== 'all' && (p.location || 'India') !== locationFilter) return false;
     return true;
@@ -154,10 +174,11 @@ export function ReportsView() {
       if (attReportType === 'absent') {
         exportToCsv(
           `absence_report_${dateFilter}.csv`,
-          ['Employee Code', 'Full Name', 'Location', 'Department', 'Designation', 'Date'],
+          ['Employee Code', 'Full Name', 'Company', 'Location', 'Department', 'Designation', 'Date'],
           absentEmployeesOnDate.map((e) => [
             e.employeeCode,
             e.fullName,
+            getCompanyShortName(e.companyId),
             e.location || 'India',
             e.department,
             e.designation,
@@ -167,10 +188,11 @@ export function ReportsView() {
       } else if (attReportType === 'employee') {
         exportToCsv(
           `employee_attendance_summary_${monthFilter}.csv`,
-          ['Employee Code', 'Name', 'Location', 'Department', 'Present Days', 'Late Count', 'Half Days', 'Leave Days', 'Working Hours'],
+          ['Employee Code', 'Name', 'Company', 'Location', 'Department', 'Present Days', 'Late Count', 'Half Days', 'Leave Days', 'Working Hours'],
           employeeMonthlySummary.map((s) => [
             s.employee.employeeCode,
             s.employee.fullName,
+            getCompanyShortName(s.employee.companyId),
             s.employee.location || 'India',
             s.employee.department,
             s.present,
@@ -183,10 +205,11 @@ export function ReportsView() {
       } else {
         exportToCsv(
           `attendance_${attReportType}_${attReportType === 'daily' ? dateFilter : monthFilter}.csv`,
-          ['Date', 'Employee', 'Department', 'Timezone', 'Punch In', 'Punch Out', 'Duration', 'Status', 'Late By (min)'],
+          ['Date', 'Employee', 'Company', 'Department', 'Timezone', 'Punch In', 'Punch Out', 'Duration', 'Status', 'Late By (min)'],
           filteredAtt.map((r) => [
             r.date,
             r.employeeName,
+            getCompanyShortName(employeeCompanyMap[r.employeeId]),
             r.department,
             r.timezone || 'Asia/Kolkata',
             formatTimeDisplay(r.punchInTime, r.timezone || 'Asia/Kolkata'),
@@ -201,10 +224,11 @@ export function ReportsView() {
       if (leaveReportType === 'balances') {
         exportToCsv(
           `leave_balances_${todayStr}.csv`,
-          ['Code', 'Employee', 'Location', 'Department', 'Sick Leave (SL)', 'Casual Leave (CL)', 'Carry Forward'],
+          ['Code', 'Employee', 'Company', 'Location', 'Department', 'Sick Leave (SL)', 'Casual Leave (CL)', 'Carry Forward'],
           deptEmployees.map((e) => [
             e.employeeCode,
             e.fullName,
+            getCompanyShortName(e.companyId),
             e.location || 'India',
             e.department,
             e.sickLeaveBalance,
@@ -215,9 +239,10 @@ export function ReportsView() {
       } else {
         exportToCsv(
           `leave_history_${todayStr}.csv`,
-          ['Employee', 'Department', 'Type', 'Start Date', 'End Date', 'Days', 'Status', 'Reason'],
+          ['Employee', 'Company', 'Department', 'Type', 'Start Date', 'End Date', 'Days', 'Status', 'Reason'],
           filteredLeaves.map((l) => [
             l.employeeName,
+            getCompanyShortName(employeeCompanyMap[l.employeeId]),
             l.department,
             l.leaveType,
             l.startDate,
@@ -228,14 +253,35 @@ export function ReportsView() {
           ])
         );
       }
+    } else if (category === 'employees') {
+      exportToCsv(
+        `employee_report_${todayStr}.csv`,
+        ['Employee Code', 'Full Name', 'Email', 'Company', 'Department', 'Designation', 'Role', 'Location', 'Currency', 'Joining Date', 'Status', 'SL Balance', 'CL Balance'],
+        deptEmployees.map((e) => [
+          e.employeeCode,
+          e.fullName,
+          e.email,
+          getCompanyShortName(e.companyId),
+          e.department,
+          e.designation,
+          e.role,
+          e.location || 'India',
+          e.currency || 'INR',
+          e.joiningDate,
+          e.status,
+          e.sickLeaveBalance,
+          e.casualLeaveBalance,
+        ])
+      );
     } else if (category === 'payroll' && canPayroll) {
       exportToCsv(
         `payroll_summary_${monthFilter}.csv`,
-        ['Month', 'Code', 'Employee', 'Location', 'Currency', 'Department', 'Gross', 'Deductions', 'Net Salary', 'Status'],
+        ['Month', 'Code', 'Employee', 'Payslip Company', 'Location', 'Currency', 'Department', 'Gross', 'Deductions', 'Net Salary', 'Status'],
         filteredPayrolls.map((p) => [
           p.month,
           p.employeeCode,
           p.employeeName,
+          p.companyName || getCompanyShortName(p.companyId || employeeCompanyMap[p.employeeId]),
           p.location || 'India',
           p.currency || 'INR',
           p.department,
@@ -271,7 +317,7 @@ export function ReportsView() {
 
       {/* Category Switcher */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-4">
-        <div className="flex items-center gap-1 p-1 bg-zinc-100 dark:bg-zinc-800 rounded-xl">
+        <div className="flex flex-wrap items-center gap-1 p-1 bg-zinc-100 dark:bg-zinc-800 rounded-xl">
           <button
             type="button"
             onClick={() => setCategory('attendance')}
@@ -290,6 +336,15 @@ export function ReportsView() {
           >
             Leave Reports
           </button>
+          <button
+            type="button"
+            onClick={() => setCategory('employees')}
+            className={`px-3.5 py-2 rounded-lg text-xs font-medium ${
+              category === 'employees' ? 'bg-white dark:bg-zinc-900 shadow-sm text-zinc-950 dark:text-white' : 'text-zinc-600 dark:text-zinc-400'
+            }`}
+          >
+            Employee Reports
+          </button>
           {canPayroll && (
             <button
               type="button"
@@ -304,6 +359,16 @@ export function ReportsView() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 text-xs">
+          <select
+            value={companyFilter}
+            onChange={(e) => setCompanyFilter(e.target.value as 'all' | CompanyId)}
+            className="min-h-[38px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-medium"
+          >
+            <option value="all">All Companies</option>
+            <option value="talentgrade">TalentGrade</option>
+            <option value="mygrade">MyGrade</option>
+          </select>
+
           {category === 'attendance' && (
             <select
               value={attReportType}
@@ -340,7 +405,8 @@ export function ReportsView() {
               className="min-h-[38px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-mono"
             />
           ) : (
-            category !== 'leave' && (
+            category !== 'leave' &&
+            category !== 'employees' && (
               <input
                 type="month"
                 value={monthFilter}
@@ -390,6 +456,7 @@ export function ReportsView() {
                   <tr className="border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950/50 text-zinc-500">
                     <th className="py-3 px-4">Code</th>
                     <th className="py-3 px-4">Employee</th>
+                    <th className="py-3 px-4">Company</th>
                     <th className="py-3 px-4">Location</th>
                     <th className="py-3 px-4">Department</th>
                     <th className="py-3 px-4">Designation</th>
@@ -399,7 +466,7 @@ export function ReportsView() {
                 <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
                   {absentEmployeesOnDate.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="py-8 text-center text-zinc-500">
+                      <td colSpan={7} className="py-8 text-center text-zinc-500">
                         No absences recorded for {dateFilter}.
                       </td>
                     </tr>
@@ -408,6 +475,7 @@ export function ReportsView() {
                       <tr key={e.id}>
                         <td className="py-3 px-4 font-mono">{e.employeeCode}</td>
                         <td className="py-3 px-4 font-semibold">{e.fullName}</td>
+                        <td className="py-3 px-4 whitespace-nowrap"><CompanyBadge companyId={e.companyId} /></td>
                         <td className="py-3 px-4">{e.location || 'India'}</td>
                         <td className="py-3 px-4">{e.department}</td>
                         <td className="py-3 px-4">{e.designation}</td>
@@ -424,6 +492,7 @@ export function ReportsView() {
                 <thead>
                   <tr className="border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950/50 text-zinc-500">
                     <th className="py-3 px-4">Employee</th>
+                    <th className="py-3 px-4">Company</th>
                     <th className="py-3 px-4">Location</th>
                     <th className="py-3 px-4">Department</th>
                     <th className="py-3 px-4 text-right">Present</th>
@@ -439,6 +508,7 @@ export function ReportsView() {
                       <td className="py-3 px-4 font-semibold">
                         {row.employee.fullName} ({row.employee.employeeCode})
                       </td>
+                      <td className="py-3 px-4 whitespace-nowrap"><CompanyBadge companyId={row.employee.companyId} /></td>
                       <td className="py-3 px-4">{row.employee.location || 'India'}</td>
                       <td className="py-3 px-4">{row.employee.department}</td>
                       <td className="py-3 px-4 text-right font-mono tabular-nums">{row.present}</td>
@@ -460,6 +530,7 @@ export function ReportsView() {
                   <tr className="border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950/50 text-zinc-500">
                     <th className="py-3 px-4">Date</th>
                     <th className="py-3 px-4">Employee</th>
+                    <th className="py-3 px-4">Company</th>
                     <th className="py-3 px-4">Department</th>
                     <th className="py-3 px-4">Punch In</th>
                     <th className="py-3 px-4">Punch Out</th>
@@ -470,7 +541,7 @@ export function ReportsView() {
                 <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
                   {filteredAtt.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="py-8 text-center text-zinc-500">
+                      <td colSpan={8} className="py-8 text-center text-zinc-500">
                         No matching attendance records.
                       </td>
                     </tr>
@@ -479,6 +550,9 @@ export function ReportsView() {
                       <tr key={r.id}>
                         <td className="py-3 px-4 font-mono">{r.date}</td>
                         <td className="py-3 px-4 font-semibold">{r.employeeName}</td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <CompanyBadge companyId={employeeCompanyMap[r.employeeId]} />
+                        </td>
                         <td className="py-3 px-4">{r.department}</td>
                         <td className="py-3 px-4 font-mono">{formatTimeDisplay(r.punchInTime, r.timezone || 'Asia/Kolkata')}</td>
                         <td className="py-3 px-4 font-mono">{formatTimeDisplay(r.punchOutTime, r.timezone || 'Asia/Kolkata')}</td>
@@ -500,6 +574,7 @@ export function ReportsView() {
                 <thead>
                   <tr className="border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950/50 text-zinc-500">
                     <th className="py-3 px-4">Employee</th>
+                    <th className="py-3 px-4">Company</th>
                     <th className="py-3 px-4">Location</th>
                     <th className="py-3 px-4">Department</th>
                     <th className="py-3 px-4 text-right">Sick Leave (SL)</th>
@@ -513,6 +588,7 @@ export function ReportsView() {
                       <td className="py-3 px-4 font-semibold">
                         {e.fullName} ({e.employeeCode})
                       </td>
+                      <td className="py-3 px-4 whitespace-nowrap"><CompanyBadge companyId={e.companyId} /></td>
                       <td className="py-3 px-4">{e.location || 'India'}</td>
                       <td className="py-3 px-4">{e.department}</td>
                       <td className="py-3 px-4 text-right font-mono tabular-nums">{e.sickLeaveBalance}</td>
@@ -549,6 +625,7 @@ export function ReportsView() {
                 <thead>
                   <tr className="border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950/50 text-zinc-500">
                     <th className="py-3 px-4">Employee</th>
+                    <th className="py-3 px-4">Company</th>
                     <th className="py-3 px-4">Type</th>
                     <th className="py-3 px-4">Period</th>
                     <th className="py-3 px-4 text-right">Days</th>
@@ -559,6 +636,9 @@ export function ReportsView() {
                   {filteredLeaves.map((l) => (
                     <tr key={l.id}>
                       <td className="py-3 px-4 font-semibold">{l.employeeName}</td>
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        <CompanyBadge companyId={employeeCompanyMap[l.employeeId]} />
+                      </td>
                       <td className="py-3 px-4 font-mono">{l.leaveType}</td>
                       <td className="py-3 px-4 font-mono">
                         {l.startDate} → {l.endDate}
@@ -571,6 +651,72 @@ export function ReportsView() {
               </table>
             </div>
           )
+        ) : category === 'employees' ? (
+          <div>
+            <div className="px-5 py-4 border-b border-zinc-200 dark:border-zinc-800 flex flex-wrap items-center justify-between gap-2 text-xs bg-zinc-50 dark:bg-zinc-950/40">
+              <span>Employee Roster Report ({deptEmployees.length} employee{deptEmployees.length === 1 ? '' : 's'})</span>
+              <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono">
+                <span>
+                  TalentGrade:{' '}
+                  {deptEmployees.filter((e) => normalizeCompanyId(e.companyId) === 'talentgrade').length}
+                </span>
+                <span>
+                  MyGrade:{' '}
+                  {deptEmployees.filter((e) => normalizeCompanyId(e.companyId) === 'mygrade').length}
+                </span>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-zinc-200 dark:border-zinc-800 text-zinc-500">
+                    <th className="py-3 px-4">Code</th>
+                    <th className="py-3 px-4">Employee</th>
+                    <th className="py-3 px-4">Company</th>
+                    <th className="py-3 px-4">Department · Designation</th>
+                    <th className="py-3 px-4">Location · Currency</th>
+                    <th className="py-3 px-4">Joined</th>
+                    <th className="py-3 px-4 text-right">SL / CL</th>
+                    <th className="py-3 px-4">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                  {deptEmployees.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-8 text-center text-zinc-500">
+                        No employees match the active filters.
+                      </td>
+                    </tr>
+                  ) : (
+                    deptEmployees.map((e) => (
+                      <tr key={e.id}>
+                        <td className="py-3 px-4 font-mono">{e.employeeCode}</td>
+                        <td className="py-3 px-4">
+                          <div className="font-semibold">{e.fullName}</div>
+                          <div className="text-[11px] text-zinc-500">{e.email}</div>
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <CompanyBadge companyId={e.companyId} />
+                        </td>
+                        <td className="py-3 px-4">
+                          <div>{e.department}</div>
+                          <div className="text-[11px] text-zinc-500">{e.designation}</div>
+                        </td>
+                        <td className="py-3 px-4 font-mono whitespace-nowrap">
+                          {e.location || 'India'} · {normalizeCompanyId(e.companyId) === 'mygrade' ? 'INR' : e.currency || 'INR'}
+                        </td>
+                        <td className="py-3 px-4 font-mono whitespace-nowrap">{e.joiningDate}</td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap">
+                          {e.sickLeaveBalance} / {e.casualLeaveBalance}
+                        </td>
+                        <td className="py-3 px-4 font-medium">{e.status}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         ) : (
           <div>
             <div className="px-5 py-4 border-b border-zinc-200 dark:border-zinc-800 flex flex-wrap items-center justify-between gap-2 text-xs bg-zinc-50 dark:bg-zinc-950/40">
@@ -590,6 +736,7 @@ export function ReportsView() {
                 <thead>
                   <tr className="border-b border-zinc-200 dark:border-zinc-800 text-zinc-500">
                     <th className="py-3 px-4">Employee</th>
+                    <th className="py-3 px-4">Payslip Company</th>
                     <th className="py-3 px-4">Location · Currency</th>
                     <th className="py-3 px-4">Department</th>
                     <th className="py-3 px-4 text-right">Gross</th>
@@ -601,7 +748,7 @@ export function ReportsView() {
                 <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
                   {filteredPayrolls.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="py-8 text-center text-zinc-500">
+                      <td colSpan={8} className="py-8 text-center text-zinc-500">
                         No payroll records for {monthFilter}.
                       </td>
                     </tr>
@@ -612,6 +759,9 @@ export function ReportsView() {
                         <tr key={p.id}>
                           <td className="py-3 px-4 font-semibold">
                             {p.employeeName} ({p.employeeCode})
+                          </td>
+                          <td className="py-3 px-4 whitespace-nowrap">
+                            <CompanyBadge companyId={p.companyId || employeeCompanyMap[p.employeeId]} />
                           </td>
                           <td className="py-3 px-4 font-mono">
                             {p.location || 'India'} · {cur}
