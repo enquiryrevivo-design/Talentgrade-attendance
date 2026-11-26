@@ -1425,9 +1425,17 @@ export async function updateEmployeeProfile(
   }
 }
 
-export async function completeFirstLoginPasswordChangeInApp(employee: Employee): Promise<string> {
-  const user = auth.currentUser;
+export async function completeFirstLoginPasswordChangeInApp(
+  employee: Employee,
+  options?: { retryAttempt?: number; user?: User }
+): Promise<string> {
+  const user = options?.user || auth.currentUser;
   if (!user) throw new Error('No active authenticated session.');
+
+  const retryAttempt =
+    typeof options?.retryAttempt === 'number' && Number.isFinite(options.retryAttempt) && options.retryAttempt > 0
+      ? Math.floor(options.retryAttempt)
+      : 0;
 
   const callEndpoint = async (forceRefresh: boolean) => {
     const token = await user.getIdToken(forceRefresh);
@@ -1439,7 +1447,10 @@ export async function completeFirstLoginPasswordChangeInApp(employee: Employee):
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify({
+        retryAttempt,
+        source: retryAttempt > 0 ? 'retry_sync' : 'initial',
+      }),
     });
   };
 
@@ -1447,6 +1458,7 @@ export async function completeFirstLoginPasswordChangeInApp(employee: Employee):
   try {
     let res = await callEndpoint(true);
     if (res.status === 401) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
       res = await callEndpoint(true);
     }
 
@@ -1481,34 +1493,68 @@ export async function completeFirstLoginPasswordChangeInApp(employee: Employee):
     }
   }
 
-  let targetEmployeeId = employee.id;
+  let targetEmployeeId = '';
+  let resolvedDocUid = '';
+  let resolvedDocRole: UserRole = employee.role;
+  let resolvedDocStatus: EmployeeStatus = employee.status;
+  let resolvedDocEmail = (employee.email || user.email || '').trim().toLowerCase();
+
   try {
-    if (!targetEmployeeId || employee.uid !== user.uid) {
-      const byUidSnap = await getDocs(query(collection(db, 'employees'), where('uid', '==', user.uid), limit(1)));
-      if (!byUidSnap.empty) {
-        targetEmployeeId = byUidSnap.docs[0].id;
+    const byUidSnap = await getDocs(query(collection(db, 'employees'), where('uid', '==', user.uid), limit(1)));
+    if (!byUidSnap.empty) {
+      const snapDoc = byUidSnap.docs[0];
+      const data = snapDoc.data() as Partial<Employee>;
+      targetEmployeeId = snapDoc.id;
+      resolvedDocUid = data.uid || '';
+      if (data.role) resolvedDocRole = data.role;
+      if (data.status) resolvedDocStatus = data.status;
+      if (data.email) resolvedDocEmail = data.email.trim().toLowerCase();
+    } else if (user.emailVerified && user.email) {
+      const byEmailSnap = await getDocs(
+        query(collection(db, 'employees'), where('email', '==', user.email.trim().toLowerCase()), limit(1))
+      );
+      if (!byEmailSnap.empty) {
+        const snapDoc = byEmailSnap.docs[0];
+        const data = snapDoc.data() as Partial<Employee>;
+        targetEmployeeId = snapDoc.id;
+        resolvedDocUid = data.uid || '';
+        if (data.role) resolvedDocRole = data.role;
+        if (data.status) resolvedDocStatus = data.status;
+        if (data.email) resolvedDocEmail = data.email.trim().toLowerCase();
       }
     }
+
     if (!targetEmployeeId) {
       throw new Error('Employee profile not found for this authenticated account.');
     }
+    if (resolvedDocStatus !== 'Active') {
+      throw new Error(`Account is marked as ${resolvedDocStatus}. Contact your Super Admin.`);
+    }
+    if (resolvedDocUid && resolvedDocUid !== user.uid) {
+      throw new Error('Authenticated user does not own this employee profile.');
+    }
 
-    await updateDoc(doc(db, 'employees', targetEmployeeId), {
+    const scopedPatch: Record<string, unknown> = {
       mustChangePassword: false,
       updatedAt: serverTimestamp(),
-    });
+    };
+    if (!resolvedDocUid && user.emailVerified) {
+      scopedPatch.uid = user.uid;
+    }
+
+    await updateDoc(doc(db, 'employees', targetEmployeeId), scopedPatch);
 
     // Ensure roles/{uid} exists so subsequent app features (selfie, attendance, leave) succeed
     try {
       const roleRef = doc(db, 'roles', user.uid);
       const roleSnap = await getDoc(roleRef);
-      if (!roleSnap.exists()) {
+      if (!roleSnap.exists() && resolvedDocEmail.length >= 3) {
         await setDoc(roleRef, {
           uid: user.uid,
-          email: (employee.email || user.email || '').trim().toLowerCase().slice(0, 120),
-          role: employee.role,
+          email: resolvedDocEmail.slice(0, 120),
+          role: resolvedDocRole,
           employeeId: targetEmployeeId,
-          status: employee.status,
+          status: resolvedDocStatus,
           updatedAt: serverTimestamp(),
         });
       }

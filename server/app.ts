@@ -208,17 +208,67 @@ export function createApiApp() {
 
   // Scoped first-login password-change completion endpoint.
   // Resolves the employee document strictly from the verified Firebase UID (never trusting client employeeId)
-  // and updates only mustChangePassword=false + server updatedAt, ensuring roles/{uid} exists if missing.
+  // and updates only mustChangePassword=false + server updatedAt (plus uid if verified and missing),
+  // then safely backfills roles/{uid} if missing.
   app.post('/api/auth/complete-password-change', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     const uid = req.authUser?.uid;
     const bearerToken = req.bearerToken;
     if (!uid || !bearerToken) {
-      return res.status(401).json({ error: 'Unauthorized: Valid session required.' });
+      return res.status(401).json({
+        error: 'Unauthorized: Valid session required.',
+        code: 'MISSING_SESSION',
+        step: 'auth_check',
+      });
     }
+
+    const rawRetry = Number((req.body as { retryAttempt?: unknown } | undefined)?.retryAttempt ?? 0);
+    const retryAttempt = Number.isFinite(rawRetry) && rawRetry >= 0 ? Math.min(20, Math.floor(rawRetry)) : 0;
+    const rawSource = (req.body as { source?: unknown } | undefined)?.source;
+    const source = rawSource === 'retry_sync' ? 'retry_sync' : 'initial';
+    const signInProvider = req.authUser?.firebase?.sign_in_provider || 'unknown';
+    const emailVerified = req.authUser?.email_verified === true;
+
+    let docResolutionResult: 'pending' | 'found_by_uid' | 'found_by_verified_email' | 'not_found' = 'pending';
+    let roleMappingResult:
+      | 'pending'
+      | 'already_exists'
+      | 'created'
+      | 'already_exists_race'
+      | 'skipped_invalid_email'
+      | 'failed' = 'pending';
+
+    const parseFirestoreRestError = (httpStatus: number, rawText: string) => {
+      let firestoreStatus = '';
+      let firestoreMessage = '';
+      let firestoreCode = httpStatus;
+      try {
+        const parsed = JSON.parse(rawText) as {
+          error?: { code?: number; status?: string; message?: string };
+        };
+        if (parsed?.error) {
+          if (typeof parsed.error.code === 'number') firestoreCode = parsed.error.code;
+          if (typeof parsed.error.status === 'string') firestoreStatus = parsed.error.status;
+          if (typeof parsed.error.message === 'string') firestoreMessage = parsed.error.message;
+        }
+      } catch {
+        // Non-JSON response body
+      }
+      if (!firestoreMessage) {
+        firestoreMessage = rawText.replace(/\s+/g, ' ').trim().slice(0, 220);
+      }
+      const mappedHttpStatus =
+        httpStatus === 401 || firestoreStatus === 'UNAUTHENTICATED'
+          ? 401
+          : httpStatus === 403 || firestoreStatus === 'PERMISSION_DENIED'
+            ? 403
+            : 500;
+      return { firestoreCode, firestoreStatus: firestoreStatus || `HTTP_${httpStatus}`, firestoreMessage, mappedHttpStatus };
+    };
 
     try {
       const { projectId, databaseId } = resolveFirebaseConfig();
       const dbRootUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents`;
+      const docResourceRoot = dbRootUrl.replace(/^https:\/\/firestore\.googleapis\.com\/v1\//, '');
 
       type FirestoreFieldMap = Record<string, { stringValue?: string; booleanValue?: boolean }>;
       type RunQueryHit = { document?: { name?: string; fields?: FirestoreFieldMap } };
@@ -246,37 +296,94 @@ export function createApiApp() {
         });
         if (!resp.ok) {
           const text = await resp.text().catch(() => '');
-          throw new Error(`Firestore employee lookup failed (${resp.status}): ${text.slice(0, 200)}`);
+          const parsedErr = parseFirestoreRestError(resp.status, text);
+          const err = new Error(
+            `Firestore employee lookup failed (${parsedErr.firestoreStatus}: ${parsedErr.firestoreMessage || resp.status})`
+          ) as Error & {
+            httpStatus?: number;
+            firestoreStatus?: string;
+            firestoreMessage?: string;
+            step?: string;
+          };
+          err.httpStatus = parsedErr.mappedHttpStatus;
+          err.firestoreStatus = parsedErr.firestoreStatus;
+          err.firestoreMessage = parsedErr.firestoreMessage;
+          err.step = 'employee_lookup';
+          throw err;
         }
         const rows = (await resp.json()) as RunQueryHit[];
         return rows.find((r) => r.document?.name)?.document || null;
       };
 
       let empDoc = await queryByField('uid', uid);
-      if (!empDoc && req.authUser?.email_verified === true && req.authUser?.email) {
+      if (empDoc) {
+        docResolutionResult = 'found_by_uid';
+      } else if (emailVerified && req.authUser?.email) {
         empDoc = await queryByField('email', req.authUser.email.toLowerCase());
+        if (empDoc) {
+          docResolutionResult = 'found_by_verified_email';
+        }
       }
 
       if (!empDoc || !empDoc.name) {
-        return res.status(404).json({ error: 'Employee profile not found for this authenticated account.' });
+        docResolutionResult = 'not_found';
+        console.warn('[auth/complete-password-change] Employee document not found', {
+          operation: 'completeFirstLoginPasswordChange',
+          verifiedUid: uid,
+          emailVerified,
+          signInProvider,
+          docResolutionResult,
+          source,
+          retryAttempt,
+        });
+        return res.status(404).json({
+          error: 'Employee profile not found for this authenticated account.',
+          code: 'EMPLOYEE_NOT_FOUND',
+          step: 'employee_lookup',
+        });
       }
 
       const employeeDocId = empDoc.name.split('/').pop() || '';
       const fields = empDoc.fields || {};
       const docUid = fields.uid?.stringValue || '';
       const docStatus = fields.status?.stringValue || '';
-      const docRole = fields.role?.stringValue || 'employee';
-      const docEmail = (fields.email?.stringValue || req.authUser?.email || '').toLowerCase();
+      const rawDocRole = fields.role?.stringValue || 'employee';
+      const docRole =
+        rawDocRole === 'super_admin' || rawDocRole === 'team_leader' || rawDocRole === 'employee'
+          ? rawDocRole
+          : 'employee';
+      const docEmail = (fields.email?.stringValue || req.authUser?.email || '').trim().toLowerCase();
 
       if (docStatus !== 'Active') {
+        console.warn('[auth/complete-password-change] Inactive employee blocked', {
+          operation: 'completeFirstLoginPasswordChange',
+          verifiedUid: uid,
+          employeeDocId,
+          docResolutionResult,
+          docStatus: docStatus || 'unknown',
+          source,
+          retryAttempt,
+        });
         return res.status(403).json({
           error: `Account is marked as ${docStatus || 'Inactive'}. Contact your Super Admin.`,
+          code: 'ACCOUNT_INACTIVE',
+          step: 'employee_status_check',
         });
       }
 
       if (docUid && docUid !== uid) {
+        console.warn('[auth/complete-password-change] UID mismatch blocked', {
+          operation: 'completeFirstLoginPasswordChange',
+          verifiedUid: uid,
+          employeeDocId,
+          docResolutionResult,
+          source,
+          retryAttempt,
+        });
         return res.status(403).json({
           error: 'Forbidden: Authenticated user does not own this employee profile.',
+          code: 'UID_MISMATCH',
+          step: 'ownership_check',
         });
       }
 
@@ -284,85 +391,220 @@ export function createApiApp() {
         mustChangePassword: { booleanValue: false },
       };
       const fieldPaths = ['mustChangePassword'];
-      if (!docUid && req.authUser?.email_verified === true) {
+      if (!docUid && emailVerified) {
         updateFields.uid = { stringValue: uid };
         fieldPaths.push('uid');
       }
 
-      const writes: Array<Record<string, unknown>> = [
-        {
-          update: {
-            name: empDoc.name,
-            fields: updateFields,
-          },
-          updateMask: { fieldPaths },
-          updateTransforms: [
-            {
-              fieldPath: 'updatedAt',
-              setToServerValue: 'REQUEST_TIME',
-            },
-          ],
-          currentDocument: { exists: true },
-        },
-      ];
-
-      // Ensure roles/{uid} exists for subsequent self-service reads/writes if it was omitted
-      const roleCheckResp = await fetch(`${dbRootUrl}/roles/${encodeURIComponent(uid)}`, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${bearerToken}` },
-      });
-      if (!roleCheckResp.ok && roleCheckResp.status !== 404) {
-        console.warn('Role existence check returned unexpected status:', roleCheckResp.status);
-      }
-      const boundedRoleEmail = docEmail.slice(0, 120);
-      if (roleCheckResp.status === 404 && boundedRoleEmail.length >= 3 && employeeDocId) {
-        writes.push({
-          update: {
-            name: `${dbRootUrl.replace(/^https:\/\/firestore\.googleapis\.com\/v1\//, '')}/roles/${encodeURIComponent(uid)}`,
-            fields: {
-              uid: { stringValue: uid },
-              email: { stringValue: boundedRoleEmail },
-              role: { stringValue: docRole },
-              employeeId: { stringValue: employeeDocId },
-              status: { stringValue: 'Active' },
-            },
-          },
-          updateTransforms: [
-            {
-              fieldPath: 'updatedAt',
-              setToServerValue: 'REQUEST_TIME',
-            },
-          ],
-          currentDocument: { exists: false },
-        });
-      }
-
-      const commitResp = await fetch(`${dbRootUrl}:commit`, {
+      // Step 1: Commit ONLY the scoped employee profile update so a role check/create race never rolls it back.
+      const empCommitResp = await fetch(`${dbRootUrl}:commit`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${bearerToken}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ writes }),
+        body: JSON.stringify({
+          writes: [
+            {
+              update: {
+                name: empDoc.name,
+                fields: updateFields,
+              },
+              updateMask: { fieldPaths },
+              updateTransforms: [
+                {
+                  fieldPath: 'updatedAt',
+                  setToServerValue: 'REQUEST_TIME',
+                },
+              ],
+              currentDocument: { exists: true },
+            },
+          ],
+        }),
       });
 
-      if (!commitResp.ok) {
-        const errText = await commitResp.text().catch(() => '');
-        console.error('Complete password change commit failed:', commitResp.status, errText);
-        return res.status(commitResp.status === 403 ? 403 : 500).json({
-          error: 'Could not finalize password change in Firestore.',
+      if (!empCommitResp.ok) {
+        const errText = await empCommitResp.text().catch(() => '');
+        const parsedErr = parseFirestoreRestError(empCommitResp.status, errText);
+        console.error('[auth/complete-password-change] Employee update failed', {
+          operation: 'completeFirstLoginPasswordChange',
+          verifiedUid: uid,
+          emailVerified,
+          signInProvider,
+          employeeDocId,
+          docResolutionResult,
+          fieldPaths,
+          source,
+          retryAttempt,
+          firestoreCode: parsedErr.firestoreCode,
+          firestoreStatus: parsedErr.firestoreStatus,
+          firestoreMessage: parsedErr.firestoreMessage,
+        });
+        return res.status(parsedErr.mappedHttpStatus).json({
+          error: `Could not finalize password change in Firestore (${parsedErr.firestoreStatus}: ${parsedErr.firestoreMessage || 'Write rejected'}).`,
+          code: 'FIRESTORE_EMPLOYEE_SYNC_FAILED',
+          firestoreStatus: parsedErr.firestoreStatus,
+          step: 'employee_update',
         });
       }
+
+      // Step 2: Verify or backfill roles/{uid} independently and idempotently.
+      const roleDocUrl = `${dbRootUrl}/roles/${encodeURIComponent(uid)}`;
+      const roleCheckResp = await fetch(roleDocUrl, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${bearerToken}` },
+      });
+
+      if (roleCheckResp.ok) {
+        roleMappingResult = 'already_exists';
+      } else if (roleCheckResp.status === 404) {
+        const boundedRoleEmail = docEmail.slice(0, 120);
+        if (boundedRoleEmail.length >= 3 && employeeDocId) {
+          const roleCommitResp = await fetch(`${dbRootUrl}:commit`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${bearerToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              writes: [
+                {
+                  update: {
+                    name: `${docResourceRoot}/roles/${encodeURIComponent(uid)}`,
+                    fields: {
+                      uid: { stringValue: uid },
+                      email: { stringValue: boundedRoleEmail },
+                      role: { stringValue: docRole },
+                      employeeId: { stringValue: employeeDocId },
+                      status: { stringValue: 'Active' },
+                    },
+                  },
+                  updateTransforms: [
+                    {
+                      fieldPath: 'updatedAt',
+                      setToServerValue: 'REQUEST_TIME',
+                    },
+                  ],
+                  currentDocument: { exists: false },
+                },
+              ],
+            }),
+          });
+
+          if (roleCommitResp.ok) {
+            roleMappingResult = 'created';
+          } else {
+            const roleErrText = await roleCommitResp.text().catch(() => '');
+            const parsedRoleErr = parseFirestoreRestError(roleCommitResp.status, roleErrText);
+            if (
+              roleCommitResp.status === 409 ||
+              parsedRoleErr.firestoreStatus === 'ALREADY_EXISTS' ||
+              parsedRoleErr.firestoreStatus === 'FAILED_PRECONDITION'
+            ) {
+              const recheckResp = await fetch(roleDocUrl, {
+                method: 'GET',
+                headers: { Authorization: `Bearer ${bearerToken}` },
+              });
+              if (recheckResp.ok) {
+                roleMappingResult = 'already_exists_race';
+              }
+            }
+
+            if (roleMappingResult !== 'already_exists_race') {
+              roleMappingResult = 'failed';
+              console.error('[auth/complete-password-change] Role backfill failed', {
+                operation: 'completeFirstLoginPasswordChange',
+                verifiedUid: uid,
+                emailVerified,
+                signInProvider,
+                employeeDocId,
+                docResolutionResult,
+                roleMappingResult,
+                source,
+                retryAttempt,
+                firestoreCode: parsedRoleErr.firestoreCode,
+                firestoreStatus: parsedRoleErr.firestoreStatus,
+                firestoreMessage: parsedRoleErr.firestoreMessage,
+              });
+              return res.status(parsedRoleErr.mappedHttpStatus).json({
+                error: `Role permissions sync failed (${parsedRoleErr.firestoreStatus}: ${parsedRoleErr.firestoreMessage || 'Could not create role mapping'}).`,
+                code: 'FIRESTORE_ROLE_SYNC_FAILED',
+                firestoreStatus: parsedRoleErr.firestoreStatus,
+                step: 'role_backfill',
+              });
+            }
+          }
+        } else {
+          roleMappingResult = 'skipped_invalid_email';
+        }
+      } else {
+        const roleCheckText = await roleCheckResp.text().catch(() => '');
+        const parsedCheckErr = parseFirestoreRestError(roleCheckResp.status, roleCheckText);
+        roleMappingResult = 'failed';
+        console.error('[auth/complete-password-change] Role check failed', {
+          operation: 'completeFirstLoginPasswordChange',
+          verifiedUid: uid,
+          employeeDocId,
+          docResolutionResult,
+          roleMappingResult,
+          source,
+          retryAttempt,
+          firestoreCode: parsedCheckErr.firestoreCode,
+          firestoreStatus: parsedCheckErr.firestoreStatus,
+          firestoreMessage: parsedCheckErr.firestoreMessage,
+        });
+        return res.status(parsedCheckErr.mappedHttpStatus).json({
+          error: `Role verification failed (${parsedCheckErr.firestoreStatus}: ${parsedCheckErr.firestoreMessage || 'Role check rejected'}).`,
+          code: 'FIRESTORE_ROLE_CHECK_FAILED',
+          firestoreStatus: parsedCheckErr.firestoreStatus,
+          step: 'role_check',
+        });
+      }
+
+      console.info('[auth/complete-password-change] Completed', {
+        operation: 'completeFirstLoginPasswordChange',
+        verifiedUid: uid,
+        employeeDocId,
+        docResolutionResult,
+        roleMappingResult,
+        source,
+        retryAttempt,
+      });
 
       res.json({
         ok: true,
         employeeId: employeeDocId,
         uid,
         mustChangePassword: false,
+        docResolutionResult,
+        roleMappingResult,
       });
     } catch (err) {
-      console.error('Error completing first-login password change:', err);
-      res.status(500).json({ error: 'Failed to finalize password change status.' });
+      const typedErr = err as Error & {
+        httpStatus?: number;
+        firestoreStatus?: string;
+        firestoreMessage?: string;
+        step?: string;
+      };
+      console.error('[auth/complete-password-change] Unhandled error', {
+        operation: 'completeFirstLoginPasswordChange',
+        verifiedUid: uid,
+        emailVerified,
+        signInProvider,
+        docResolutionResult,
+        roleMappingResult,
+        source,
+        retryAttempt,
+        step: typedErr.step || 'unknown',
+        firestoreStatus: typedErr.firestoreStatus || '',
+        message: typedErr.message,
+      });
+      res.status(typedErr.httpStatus || 500).json({
+        error: typedErr.message || 'Failed to finalize password change status.',
+        code: 'COMPLETE_PASSWORD_CHANGE_ERROR',
+        firestoreStatus: typedErr.firestoreStatus,
+        step: typedErr.step || 'unknown',
+      });
     }
   });
 

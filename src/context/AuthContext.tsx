@@ -53,7 +53,7 @@ interface AuthContextValue {
   requestPasswordReset: (email: string) => Promise<void>;
   completeFirstLoginPasswordChange: (
     newPassword: string,
-    options?: { currentPassword?: string; skipAuthUpdate?: boolean }
+    options?: { currentPassword?: string; skipAuthUpdate?: boolean; retryAttempt?: number }
   ) => Promise<void>;
   logout: () => Promise<void>;
   refreshSession: () => Promise<void>;
@@ -184,7 +184,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const completeFirstLoginPasswordChange = async (
     newPassword: string,
-    options?: { currentPassword?: string; skipAuthUpdate?: boolean }
+    options?: { currentPassword?: string; skipAuthUpdate?: boolean; retryAttempt?: number }
   ) => {
     const activeUser = auth.currentUser || firebaseUser;
     if (!activeUser || !employee) throw new Error('No active session');
@@ -222,11 +222,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    // updatePassword rotates auth refresh tokens; force-refresh the ID token before persisting profile state.
-    await activeUser.getIdToken(true);
+    // completeFirstLoginPasswordChangeInApp force-refreshes the ID token (and retries on 401) after updatePassword.
     let resolvedEmployeeId: string;
     try {
-      resolvedEmployeeId = await completeFirstLoginPasswordChangeInApp(employee);
+      resolvedEmployeeId = await completeFirstLoginPasswordChangeInApp(employee, {
+        retryAttempt: options?.retryAttempt ?? 0,
+        user: activeUser,
+      });
     } catch (syncErr: unknown) {
       const detail = syncErr instanceof Error ? syncErr.message : 'Could not update profile status.';
       throw new ProfileSyncPendingError(
@@ -235,7 +237,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     setEmployee((prev) =>
-      prev ? { ...prev, id: resolvedEmployeeId || prev.id, mustChangePassword: false } : prev
+      prev ? { ...prev, id: resolvedEmployeeId || prev.id, uid: activeUser.uid, mustChangePassword: false } : prev
     );
 
     void resolveEmployeeSession(activeUser)

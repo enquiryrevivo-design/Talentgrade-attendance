@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Lock, Mail, Eye, EyeOff, ArrowRight, ShieldCheck, Loader2, KeyRound, RefreshCw } from 'lucide-react';
 import { ProfileSyncPendingError, ReauthRequiredError, useAuth } from '../context/AuthContext';
 import { useToast } from '../components/Toast';
@@ -261,13 +261,28 @@ export function ForcePasswordChangeModal() {
   const [showConfirmPass, setShowConfirmPass] = useState(false);
   const [needsReauth, setNeedsReauth] = useState(false);
   const [passwordSavedInAuth, setPasswordSavedInAuth] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+
+  useEffect(() => {
+    setCurrentPass('');
+    setNewPass('');
+    setConfirmPass('');
+    setShowNewPass(false);
+    setShowConfirmPass(false);
+    setNeedsReauth(false);
+    setPasswordSavedInAuth(false);
+    setRetryCount(0);
+    setSaving(false);
+    setErr('');
+  }, [employee?.id]);
 
   if (!employee?.mustChangePassword) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (saving) return;
     setErr('');
     if (!passwordSavedInAuth) {
       if (newPass.length < 8) {
@@ -284,11 +299,13 @@ export function ForcePasswordChangeModal() {
       }
     }
 
+    const nextRetryAttempt = passwordSavedInAuth ? retryCount + 1 : 0;
     setSaving(true);
     try {
       await completeFirstLoginPasswordChange(newPass, {
         currentPassword: needsReauth ? currentPass : undefined,
         skipAuthUpdate: passwordSavedInAuth,
+        retryAttempt: nextRetryAttempt,
       });
       showToast('Password updated successfully.', 'success');
     } catch (error: unknown) {
@@ -296,6 +313,9 @@ export function ForcePasswordChangeModal() {
         setNeedsReauth(true);
       } else if (error instanceof ProfileSyncPendingError) {
         setPasswordSavedInAuth(true);
+        if (nextRetryAttempt > 0) {
+          setRetryCount(nextRetryAttempt);
+        }
       }
       setErr(error instanceof Error ? error.message : 'Unable to update password. Please retry.');
     } finally {
@@ -321,6 +341,12 @@ export function ForcePasswordChangeModal() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          {passwordSavedInAuth && (
+            <div className="p-3 rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/30 text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
+              Your new password is saved in authentication. Click <strong>Retry Sync</strong> below to complete your workspace profile activation.
+            </div>
+          )}
+
           {needsReauth && !passwordSavedInAuth && (
             <div className="space-y-1.5">
               <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
@@ -388,12 +414,17 @@ export function ForcePasswordChangeModal() {
             </>
           )}
 
-          {err && <p className="text-xs text-[#B5121B] dark:text-red-400">{err}</p>}
+          {err && (
+            <p role="alert" className="text-xs text-[#B5121B] dark:text-red-400 leading-relaxed">
+              {err}
+            </p>
+          )}
           <div className="flex gap-3 pt-1">
             <button
               type="button"
+              disabled={saving}
               onClick={logout}
-              className="flex-1 min-h-[44px] rounded-xl border border-zinc-200 dark:border-zinc-700 text-sm font-medium"
+              className="flex-1 min-h-[44px] rounded-xl border border-zinc-200 dark:border-zinc-700 text-sm font-medium disabled:opacity-50"
             >
               Sign Out
             </button>
@@ -402,7 +433,13 @@ export function ForcePasswordChangeModal() {
               disabled={saving}
               className="flex-1 min-h-[44px] rounded-xl bg-[#B5121B] text-white text-sm font-medium hover:bg-[#960E16] disabled:opacity-50"
             >
-              {saving ? 'Updating...' : passwordSavedInAuth ? 'Retry Sync' : 'Save Password'}
+              {saving
+                ? passwordSavedInAuth
+                  ? 'Retrying Sync...'
+                  : 'Updating...'
+                : passwordSavedInAuth
+                  ? 'Retry Sync'
+                  : 'Save Password'}
             </button>
           </div>
         </form>
