@@ -1,14 +1,11 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import {
   User,
-  EmailAuthProvider,
   onAuthStateChanged,
   onIdTokenChanged,
   signInWithPopup,
   signInWithEmailAndPassword,
   sendPasswordResetEmail,
-  updatePassword,
-  reauthenticateWithCredential,
   fetchSignInMethodsForEmail,
   signOut,
 } from 'firebase/auth';
@@ -21,24 +18,8 @@ import {
   formatSessionResolutionError,
 } from '../lib/authErrors';
 import { CompanySettings, Employee } from '../types/hr';
-import { completeFirstLoginPasswordChangeInApp, fetchMediaAsset, resolveEmployeeSession } from '../lib/hrService';
+import { fetchMediaAsset, resolveEmployeeSession } from '../lib/hrService';
 import { syncReminderSnapshotToServer } from '../lib/pushService';
-
-export class ReauthRequiredError extends Error {
-  readonly requiresReauth = true;
-  constructor(message: string) {
-    super(message);
-    this.name = 'ReauthRequiredError';
-  }
-}
-
-export class ProfileSyncPendingError extends Error {
-  readonly passwordAlreadyUpdatedInAuth = true;
-  constructor(message: string) {
-    super(message);
-    this.name = 'ProfileSyncPendingError';
-  }
-}
 
 interface AuthContextValue {
   firebaseUser: User | null;
@@ -51,10 +32,6 @@ interface AuthContextValue {
   signInWithGoogle: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
   requestPasswordReset: (email: string) => Promise<void>;
-  completeFirstLoginPasswordChange: (
-    newPassword: string,
-    options?: { currentPassword?: string; skipAuthUpdate?: boolean; retryAttempt?: number }
-  ) => Promise<void>;
   logout: () => Promise<void>;
   refreshSession: () => Promise<void>;
 }
@@ -182,74 +159,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const completeFirstLoginPasswordChange = async (
-    newPassword: string,
-    options?: { currentPassword?: string; skipAuthUpdate?: boolean; retryAttempt?: number }
-  ) => {
-    const activeUser = auth.currentUser || firebaseUser;
-    if (!activeUser || !employee) throw new Error('No active session');
-
-    if (!options?.skipAuthUpdate) {
-      if (options?.currentPassword && activeUser.email) {
-        try {
-          const cred = EmailAuthProvider.credential(activeUser.email, options.currentPassword);
-          await reauthenticateWithCredential(activeUser, cred);
-        } catch (reauthErr: unknown) {
-          const code = extractFirebaseAuthCode(reauthErr);
-          if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
-            throw new Error('The current password you entered is incorrect.');
-          }
-          if (code === 'auth/too-many-requests') {
-            throw new Error('Too many failed verification attempts. Please wait a few minutes and try again.');
-          }
-          throw new Error(reauthErr instanceof Error ? reauthErr.message : 'Could not verify your current password.');
-        }
-      }
-
-      try {
-        await updatePassword(activeUser, newPassword);
-      } catch (err: unknown) {
-        const code = extractFirebaseAuthCode(err);
-        if (code === 'auth/requires-recent-login') {
-          throw new ReauthRequiredError(
-            'For your security, please enter your current temporary password below to confirm your new password.'
-          );
-        }
-        if (code === 'auth/weak-password') {
-          throw new Error('Please choose a stronger password with at least 8 characters.');
-        }
-        throw err;
-      }
-    }
-
-    // completeFirstLoginPasswordChangeInApp force-refreshes the ID token (and retries on 401) after updatePassword.
-    let resolvedEmployeeId: string;
-    try {
-      resolvedEmployeeId = await completeFirstLoginPasswordChangeInApp(employee, {
-        retryAttempt: options?.retryAttempt ?? 0,
-        user: activeUser,
-      });
-    } catch (syncErr: unknown) {
-      const detail = syncErr instanceof Error ? syncErr.message : 'Could not update profile status.';
-      throw new ProfileSyncPendingError(
-        `Your new password is saved in authentication, but workspace profile sync failed (${detail}). Click "Retry Sync" below to complete setup.`
-      );
-    }
-
-    setEmployee((prev) =>
-      prev ? { ...prev, id: resolvedEmployeeId || prev.id, uid: activeUser.uid, mustChangePassword: false } : prev
-    );
-
-    void resolveEmployeeSession(activeUser)
-      .then((res) => {
-        if (res?.employee) {
-          setEmployee(res.employee);
-          setSettings(res.settings);
-        }
-      })
-      .catch(() => {});
-  };
-
   const logout = async () => {
     setAuthError(null);
     await signOut(auth);
@@ -275,7 +184,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         signInWithGoogle,
         signInWithEmail,
         requestPasswordReset,
-        completeFirstLoginPasswordChange,
         logout,
         refreshSession,
       }}

@@ -643,6 +643,14 @@ export async function resolveEmployeeSession(user: User): Promise<{
       });
     }
 
+    if (emp.mustChangePassword !== false) {
+      emp.mustChangePassword = false;
+      void updateDoc(doc(db, 'employees', emp.id), {
+        mustChangePassword: false,
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+    }
+
     let settings = await getCompanySettings();
     if (
       email === BOOTSTRAPPED_ADMIN_EMAIL &&
@@ -768,14 +776,19 @@ export async function fetchAllEmployees(
   try {
     const byId = new Map<string, Employee>();
     const missingCompanyIds: string[] = [];
+    const docsNeedingPasswordFlagReset: string[] = [];
     const registerDoc = (id: string, raw: Omit<Employee, 'id'>) => {
       if (!raw.companyId) {
         missingCompanyIds.push(id);
+      }
+      if (raw.mustChangePassword !== false) {
+        docsNeedingPasswordFlagReset.push(id);
       }
       byId.set(id, {
         id,
         ...raw,
         companyId: normalizeCompanyId(raw.companyId),
+        mustChangePassword: false,
       });
     };
 
@@ -827,6 +840,53 @@ export async function fetchAllEmployees(
       }
     }
 
+    // Safe non-destructive normalization: ensure mustChangePassword=false across all existing employees.
+    // Never modifies passwords, Auth accounts, UIDs, roles, company assignments, attendance, leave, or payroll.
+    if (currentEmployee.role === 'super_admin' && docsNeedingPasswordFlagReset.length > 0) {
+      try {
+        let updatedCount = 0;
+        for (let i = 0; i < docsNeedingPasswordFlagReset.length; i += 400) {
+          const chunk = docsNeedingPasswordFlagReset.slice(i, i + 400);
+          const batch = writeBatch(db);
+          chunk.forEach((empDocId) => {
+            batch.update(doc(db, 'employees', empDocId), {
+              mustChangePassword: false,
+              updatedAt: serverTimestamp(),
+            });
+          });
+          try {
+            await batch.commit();
+            updatedCount += chunk.length;
+          } catch {
+            // If any legacy doc in a chunk fails batch rules, update valid docs individually so others still succeed
+            for (const empDocId of chunk) {
+              try {
+                await updateDoc(doc(db, 'employees', empDocId), {
+                  mustChangePassword: false,
+                  updatedAt: serverTimestamp(),
+                });
+                updatedCount += 1;
+              } catch {
+                // Skip individual doc if blocked; session login will still allow direct entry
+              }
+            }
+          }
+        }
+        if (updatedCount > 0) {
+          await writeAuditLog({
+            actor: currentEmployee,
+            action: 'DISABLE_MANDATORY_PASSWORD_CHANGE',
+            entityType: 'Employee',
+            entityId: 'batch_must_change_password_false',
+            updatedValues: { count: updatedCount, mustChangePassword: false },
+            summary: `Set mustChangePassword=false for ${updatedCount} existing employee profile(s).`,
+          }).catch(() => {});
+        }
+      } catch (pwdBackfillErr) {
+        console.warn('Non-destructive mustChangePassword normalization skipped:', pwdBackfillErr);
+      }
+    }
+
     return Array.from(byId.values()).sort((a, b) => a.employeeCode.localeCompare(b.employeeCode));
   } catch (err) {
     handleFirestoreError(err, OperationType.LIST, 'employees');
@@ -863,7 +923,7 @@ export async function createEmployeeAccount(
     clEligibilityDate?: string;
     clEligibilityCustom?: boolean;
     temporaryPassword?: string;
-    mustChangePassword: boolean;
+    mustChangePassword?: boolean;
   },
   actor: Employee,
   options?: { leavePolicy?: LeavePolicyConfig }
@@ -1010,7 +1070,7 @@ export async function createEmployeeAccount(
       leaveLastResetYear: currentYear,
       clEligibilityDate,
       clEligibilityCustom: hasCustomClEligibility ? true : undefined,
-      mustChangePassword: input.mustChangePassword,
+      mustChangePassword: false,
       failedLoginAttempts: 0,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -1422,149 +1482,6 @@ export async function updateEmployeeProfile(
       throw err;
     }
     handleFirestoreError(err, OperationType.UPDATE, `employees/${employeeId}`);
-  }
-}
-
-export async function completeFirstLoginPasswordChangeInApp(
-  employee: Employee,
-  options?: { retryAttempt?: number; user?: User }
-): Promise<string> {
-  const user = options?.user || auth.currentUser;
-  if (!user) throw new Error('No active authenticated session.');
-
-  const retryAttempt =
-    typeof options?.retryAttempt === 'number' && Number.isFinite(options.retryAttempt) && options.retryAttempt > 0
-      ? Math.floor(options.retryAttempt)
-      : 0;
-
-  const callEndpoint = async (forceRefresh: boolean) => {
-    const token = await user.getIdToken(forceRefresh);
-    return fetch('/api/auth/complete-password-change', {
-      method: 'POST',
-      cache: 'no-store',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        retryAttempt,
-        source: retryAttempt > 0 ? 'retry_sync' : 'initial',
-      }),
-    });
-  };
-
-  let shouldFallbackToClientFirestore = false;
-  try {
-    let res = await callEndpoint(true);
-    if (res.status === 401) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      res = await callEndpoint(true);
-    }
-
-    const contentType = res.headers.get('content-type') || '';
-    if (res.ok) {
-      if (contentType.includes('application/json')) {
-        const body = (await res.json().catch(() => null)) as { ok?: boolean; employeeId?: string } | null;
-        if (body?.employeeId) return body.employeeId;
-      }
-      return employee.id;
-    }
-
-    // If API endpoint isn't hosted in this environment (e.g., static preview returning HTML 404), fall back safely
-    if (res.status === 404 && !contentType.includes('application/json')) {
-      shouldFallbackToClientFirestore = true;
-    } else {
-      let detail = '';
-      if (contentType.includes('application/json')) {
-        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
-        if (errBody && typeof errBody.error === 'string') {
-          detail = errBody.error;
-        }
-      }
-      throw new Error(detail || `Could not finalize password change (HTTP ${res.status}).`);
-    }
-  } catch (err: unknown) {
-    // Network/transport failure when API server isn't reachable -> allow scoped client Firestore update
-    if (err instanceof TypeError) {
-      shouldFallbackToClientFirestore = true;
-    } else if (!shouldFallbackToClientFirestore) {
-      throw err;
-    }
-  }
-
-  let targetEmployeeId = '';
-  let resolvedDocUid = '';
-  let resolvedDocRole: UserRole = employee.role;
-  let resolvedDocStatus: EmployeeStatus = employee.status;
-  let resolvedDocEmail = (employee.email || user.email || '').trim().toLowerCase();
-
-  try {
-    const byUidSnap = await getDocs(query(collection(db, 'employees'), where('uid', '==', user.uid), limit(1)));
-    if (!byUidSnap.empty) {
-      const snapDoc = byUidSnap.docs[0];
-      const data = snapDoc.data() as Partial<Employee>;
-      targetEmployeeId = snapDoc.id;
-      resolvedDocUid = data.uid || '';
-      if (data.role) resolvedDocRole = data.role;
-      if (data.status) resolvedDocStatus = data.status;
-      if (data.email) resolvedDocEmail = data.email.trim().toLowerCase();
-    } else if (user.emailVerified && user.email) {
-      const byEmailSnap = await getDocs(
-        query(collection(db, 'employees'), where('email', '==', user.email.trim().toLowerCase()), limit(1))
-      );
-      if (!byEmailSnap.empty) {
-        const snapDoc = byEmailSnap.docs[0];
-        const data = snapDoc.data() as Partial<Employee>;
-        targetEmployeeId = snapDoc.id;
-        resolvedDocUid = data.uid || '';
-        if (data.role) resolvedDocRole = data.role;
-        if (data.status) resolvedDocStatus = data.status;
-        if (data.email) resolvedDocEmail = data.email.trim().toLowerCase();
-      }
-    }
-
-    if (!targetEmployeeId) {
-      throw new Error('Employee profile not found for this authenticated account.');
-    }
-    if (resolvedDocStatus !== 'Active') {
-      throw new Error(`Account is marked as ${resolvedDocStatus}. Contact your Super Admin.`);
-    }
-    if (resolvedDocUid && resolvedDocUid !== user.uid) {
-      throw new Error('Authenticated user does not own this employee profile.');
-    }
-
-    const scopedPatch: Record<string, unknown> = {
-      mustChangePassword: false,
-      updatedAt: serverTimestamp(),
-    };
-    if (!resolvedDocUid && user.emailVerified) {
-      scopedPatch.uid = user.uid;
-    }
-
-    await updateDoc(doc(db, 'employees', targetEmployeeId), scopedPatch);
-
-    // Ensure roles/{uid} exists so subsequent app features (selfie, attendance, leave) succeed
-    try {
-      const roleRef = doc(db, 'roles', user.uid);
-      const roleSnap = await getDoc(roleRef);
-      if (!roleSnap.exists() && resolvedDocEmail.length >= 3) {
-        await setDoc(roleRef, {
-          uid: user.uid,
-          email: resolvedDocEmail.slice(0, 120),
-          role: resolvedDocRole,
-          employeeId: targetEmployeeId,
-          status: resolvedDocStatus,
-          updatedAt: serverTimestamp(),
-        });
-      }
-    } catch (roleErr) {
-      console.warn('Role sync skipped after password change:', roleErr);
-    }
-
-    return targetEmployeeId;
-  } catch (fsErr) {
-    handleFirestoreError(fsErr, OperationType.UPDATE, `employees/${targetEmployeeId || 'unknown'}`);
   }
 }
 

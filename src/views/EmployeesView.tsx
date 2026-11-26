@@ -140,7 +140,7 @@ export function EmployeesView() {
     clEligibilityDate: calculateCasualLeaveEligibilityDate(new Date().toISOString().slice(0, 10), 6),
     clEligibilityCustom: false,
     temporaryPassword: generateTempPassword(),
-    mustChangePassword: true,
+    mustChangePassword: false,
   });
 
   // Profile Drawer / Modal
@@ -464,7 +464,7 @@ export function EmployeesView() {
           clEligibilityDate: newEmp.clEligibilityDate,
           clEligibilityCustom: newEmp.clEligibilityCustom,
           temporaryPassword: newEmp.temporaryPassword,
-          mustChangePassword: newEmp.mustChangePassword,
+          mustChangePassword: false,
         },
         employee,
         { leavePolicy: settings.leavePolicy }
@@ -507,7 +507,7 @@ export function EmployeesView() {
         clEligibilityDate: resetSummary.clEligibilityDate,
         clEligibilityCustom: false,
         temporaryPassword: generateTempPassword(),
-        mustChangePassword: true,
+        mustChangePassword: false,
       });
       await loadData();
       await refreshCelebrations();
@@ -607,7 +607,6 @@ export function EmployeesView() {
   const handleResetPassword = async (emp: Employee) => {
     try {
       await requestPasswordReset(emp.email);
-      await updateEmployeeProfile(emp.id, { mustChangePassword: true }, employee);
       showToast(`Password reset triggered for ${emp.email}.`, 'success');
     } catch (err: unknown) {
       showToast(err instanceof Error ? err.message : 'Could not send reset email', 'error');
@@ -1471,15 +1470,9 @@ export function EmployeesView() {
                   onChange={(e) => setNewEmp((p) => ({ ...p, temporaryPassword: e.target.value }))}
                   className="w-full min-h-[38px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono"
                 />
-                <label className="flex items-center gap-2 text-zinc-600 dark:text-zinc-300">
-                  <input
-                    type="checkbox"
-                    checked={newEmp.mustChangePassword}
-                    onChange={(e) => setNewEmp((p) => ({ ...p, mustChangePassword: e.target.checked }))}
-                    className="accent-[#B5121B]"
-                  />
-                  Require password change on first login
-                </label>
+                <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                  The employee can sign in immediately with this assigned password without a forced first-login reset.
+                </p>
               </div>
             </div>
 

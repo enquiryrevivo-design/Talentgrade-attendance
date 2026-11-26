@@ -10,7 +10,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import { ToastProvider } from './components/Toast';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { AppShell } from './components/AppShell';
-import { ForcePasswordChangeModal, LoginView } from './views/LoginView';
+import { LoginView } from './views/LoginView';
 import { DashboardView } from './views/DashboardView';
 import { AttendanceView } from './views/AttendanceView';
 import { LeavesView } from './views/LeavesView';
@@ -99,7 +99,6 @@ function AppRouter() {
 
   return (
     <>
-      <ForcePasswordChangeModal />
       <CelebrationWishModal />
       <AppShell activePage={activePage} onNavigate={setActivePage}>
         {renderPage()}
