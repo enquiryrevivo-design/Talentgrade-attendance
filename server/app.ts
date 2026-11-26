@@ -93,8 +93,30 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
     req.bearerToken = token;
     next();
   } catch (err) {
-    console.error('Token verification failed:', err);
-    return res.status(401).json({ error: 'Unauthorized: Invalid or expired session token' });
+    const code = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : '';
+    console.error('Token verification failed:', code || err);
+    if (code === 'auth/id-token-expired') {
+      return res.status(401).json({
+        error: 'Session token expired. Please retry to refresh your session.',
+        code: 'TOKEN_EXPIRED',
+      });
+    }
+    if (code === 'auth/id-token-revoked') {
+      return res.status(401).json({
+        error: 'Session was revoked. Please sign in again.',
+        code: 'TOKEN_REVOKED',
+      });
+    }
+    if (code === 'auth/user-disabled') {
+      return res.status(403).json({
+        error: 'Account disabled in Firebase Authentication.',
+        code: 'USER_DISABLED',
+      });
+    }
+    return res.status(401).json({
+      error: 'Unauthorized: Invalid or expired session token',
+      code: 'INVALID_TOKEN',
+    });
   }
 }
 

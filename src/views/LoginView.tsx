@@ -1,14 +1,18 @@
 import React, { useState } from 'react';
-import { Lock, Mail, Eye, EyeOff, ArrowRight, ShieldCheck, Loader2, KeyRound } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { Lock, Mail, Eye, EyeOff, ArrowRight, ShieldCheck, Loader2, KeyRound, RefreshCw } from 'lucide-react';
+import { ProfileSyncPendingError, ReauthRequiredError, useAuth } from '../context/AuthContext';
 import { useToast } from '../components/Toast';
 import { TalentGradeLogo } from '../components/TalentGradeLogo';
 
 export function LoginView() {
   const {
+    firebaseUser,
     signInWithGoogle,
     signInWithEmail,
     requestPasswordReset,
+    refreshSession,
+    logout,
+    clearAuthError,
     authError,
     loading,
     settings,
@@ -97,9 +101,28 @@ export function LoginView() {
           {authError && (
             <div
               role="alert"
-              className="p-3.5 rounded-xl border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-xs text-[#B5121B] dark:text-red-300 leading-relaxed"
+              className="p-3.5 rounded-xl border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-xs text-[#B5121B] dark:text-red-300 leading-relaxed space-y-2"
             >
-              {authError}
+              <div>{authError}</div>
+              {firebaseUser && (
+                <div className="flex items-center gap-3 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => void refreshSession()}
+                    className="inline-flex items-center gap-1 font-semibold underline hover:opacity-80"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    Retry Session
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void logout()}
+                    className="font-medium text-zinc-700 dark:text-zinc-300 underline hover:opacity-80"
+                  >
+                    Sign Out
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -160,7 +183,10 @@ export function LoginView() {
                     </label>
                     <button
                       type="button"
-                      onClick={() => setMode('reset')}
+                      onClick={() => {
+                        clearAuthError();
+                        setMode('reset');
+                      }}
                       className="text-xs font-medium text-[#B5121B] dark:text-red-400 hover:underline"
                     >
                       Forgot password?
@@ -204,7 +230,10 @@ export function LoginView() {
               {mode === 'reset' && (
                 <button
                   type="button"
-                  onClick={() => setMode('signin')}
+                  onClick={() => {
+                    clearAuthError();
+                    setMode('signin');
+                  }}
                   className="w-full text-center text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:underline"
                 >
                   Back to sign in
@@ -225,8 +254,13 @@ export function LoginView() {
 export function ForcePasswordChangeModal() {
   const { employee, completeFirstLoginPasswordChange, logout } = useAuth();
   const { showToast } = useToast();
+  const [currentPass, setCurrentPass] = useState('');
   const [newPass, setNewPass] = useState('');
   const [confirmPass, setConfirmPass] = useState('');
+  const [showNewPass, setShowNewPass] = useState(false);
+  const [showConfirmPass, setShowConfirmPass] = useState(false);
+  const [needsReauth, setNeedsReauth] = useState(false);
+  const [passwordSavedInAuth, setPasswordSavedInAuth] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
@@ -235,20 +269,35 @@ export function ForcePasswordChangeModal() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr('');
-    if (newPass.length < 8) {
-      setErr('Password must be at least 8 characters long.');
-      return;
+    if (!passwordSavedInAuth) {
+      if (newPass.length < 8) {
+        setErr('Password must be at least 8 characters long.');
+        return;
+      }
+      if (newPass !== confirmPass) {
+        setErr('Passwords do not match.');
+        return;
+      }
+      if (needsReauth && !currentPass) {
+        setErr('Please enter your current password to verify this change.');
+        return;
+      }
     }
-    if (newPass !== confirmPass) {
-      setErr('Passwords do not match.');
-      return;
-    }
+
     setSaving(true);
     try {
-      await completeFirstLoginPasswordChange(newPass);
+      await completeFirstLoginPasswordChange(newPass, {
+        currentPassword: needsReauth ? currentPass : undefined,
+        skipAuthUpdate: passwordSavedInAuth,
+      });
       showToast('Password updated successfully.', 'success');
     } catch (error: unknown) {
-      setErr(error instanceof Error ? error.message : 'Unable to update password. Please re-authenticate and retry.');
+      if (error instanceof ReauthRequiredError) {
+        setNeedsReauth(true);
+      } else if (error instanceof ProfileSyncPendingError) {
+        setPasswordSavedInAuth(true);
+      }
+      setErr(error instanceof Error ? error.message : 'Unable to update password. Please retry.');
     } finally {
       setSaving(false);
     }
@@ -272,32 +321,73 @@ export function ForcePasswordChangeModal() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
-              New Password (min 8 characters)
-            </label>
-            <input
-              type="password"
-              required
-              minLength={8}
-              value={newPass}
-              onChange={(e) => setNewPass(e.target.value)}
-              className="w-full min-h-[44px] px-3.5 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-sm"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
-              Confirm New Password
-            </label>
-            <input
-              type="password"
-              required
-              minLength={8}
-              value={confirmPass}
-              onChange={(e) => setConfirmPass(e.target.value)}
-              className="w-full min-h-[44px] px-3.5 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-sm"
-            />
-          </div>
+          {needsReauth && !passwordSavedInAuth && (
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                Current Temporary Password
+              </label>
+              <input
+                type="password"
+                required
+                value={currentPass}
+                onChange={(e) => setCurrentPass(e.target.value)}
+                placeholder="Enter current password"
+                className="w-full min-h-[44px] px-3.5 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-sm"
+              />
+            </div>
+          )}
+
+          {!passwordSavedInAuth && (
+            <>
+              <div className="space-y-1.5">
+                <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                  New Password (min 8 characters)
+                </label>
+                <div className="relative">
+                  <input
+                    type={showNewPass ? 'text' : 'password'}
+                    required
+                    minLength={8}
+                    value={newPass}
+                    onChange={(e) => setNewPass(e.target.value)}
+                    className="w-full min-h-[44px] pl-3.5 pr-11 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPass((v) => !v)}
+                    aria-label={showNewPass ? 'Hide new password' : 'Show new password'}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 min-h-[36px] min-w-[36px] flex items-center justify-center text-zinc-400 hover:text-zinc-700"
+                  >
+                    {showNewPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                  Confirm New Password
+                </label>
+                <div className="relative">
+                  <input
+                    type={showConfirmPass ? 'text' : 'password'}
+                    required
+                    minLength={8}
+                    value={confirmPass}
+                    onChange={(e) => setConfirmPass(e.target.value)}
+                    className="w-full min-h-[44px] pl-3.5 pr-11 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPass((v) => !v)}
+                    aria-label={showConfirmPass ? 'Hide confirm password' : 'Show confirm password'}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 min-h-[36px] min-w-[36px] flex items-center justify-center text-zinc-400 hover:text-zinc-700"
+                  >
+                    {showConfirmPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+
           {err && <p className="text-xs text-[#B5121B] dark:text-red-400">{err}</p>}
           <div className="flex gap-3 pt-1">
             <button
@@ -312,7 +402,7 @@ export function ForcePasswordChangeModal() {
               disabled={saving}
               className="flex-1 min-h-[44px] rounded-xl bg-[#B5121B] text-white text-sm font-medium hover:bg-[#960E16] disabled:opacity-50"
             >
-              {saving ? 'Updating...' : 'Save Password'}
+              {saving ? 'Updating...' : passwordSavedInAuth ? 'Retry Sync' : 'Save Password'}
             </button>
           </div>
         </form>

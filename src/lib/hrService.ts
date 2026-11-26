@@ -1,6 +1,7 @@
 import { initializeApp, deleteApp } from 'firebase/app';
 import {
-  getAuth,
+  initializeAuth,
+  inMemoryPersistence,
   createUserWithEmailAndPassword,
   signOut,
   User,
@@ -522,7 +523,7 @@ export async function resolveEmployeeSession(user: User): Promise<{
 }> {
   const email = (user.email || '').toLowerCase();
 
-  try {
+  const runSessionLookup = async () => {
     const byUidSnap = await getDocs(query(collection(db, 'employees'), where('uid', '==', user.uid)));
     let emp: Employee | null = null;
     if (!byUidSnap.empty) {
@@ -570,14 +571,22 @@ export async function resolveEmployeeSession(user: User): Promise<{
       };
     }
 
-    // Link UID & sync roles/{uid} on first verified login if employee doc was pre-created without UID
-    if (emp.uid !== user.uid) {
+    // Preserve permanent UID linkage: only bind UID if the employee record did not yet have one.
+    if (!emp.uid) {
       await updateDoc(doc(db, 'employees', emp.id), {
         uid: user.uid,
         failedLoginAttempts: 0,
         updatedAt: serverTimestamp(),
       });
       emp.uid = user.uid;
+    } else if (emp.uid !== user.uid) {
+      const safeSettings = await getCompanySettings().catch(() => null);
+      return {
+        employee: null,
+        settings: safeSettings,
+        errorReason:
+          'This work email is already linked to another sign-in credential. Please sign in using your original method or ask your Super Admin to inspect your account.',
+      };
     }
 
     const roleSnap = await getDoc(doc(db, 'roles', user.uid));
@@ -603,7 +612,27 @@ export async function resolveEmployeeSession(user: User): Promise<{
     }
 
     return { employee: emp, settings };
+  };
+
+  try {
+    return await runSessionLookup();
   } catch (err) {
+    // If a cached session token expired after inactivity, force-refresh once and retry session resolution
+    const errCode = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : '';
+    const errMsg = err instanceof Error ? err.message.toLowerCase() : '';
+    if (
+      errCode === 'permission-denied' ||
+      errCode === 'unauthenticated' ||
+      errMsg.includes('permission') ||
+      errMsg.includes('unauthenticated')
+    ) {
+      try {
+        await user.getIdToken(true);
+        return await runSessionLookup();
+      } catch (retryErr) {
+        handleFirestoreError(retryErr, OperationType.GET, 'employees/session');
+      }
+    }
     handleFirestoreError(err, OperationType.GET, 'employees/session');
   }
 }
@@ -818,7 +847,7 @@ export async function createEmployeeAccount(
       const secondaryName = `secondary_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       const secondaryApp = initializeApp(firebaseConfig, secondaryName);
       try {
-        const secondaryAuth = getAuth(secondaryApp);
+        const secondaryAuth = initializeAuth(secondaryApp, { persistence: inMemoryPersistence });
         const cred = await createUserWithEmailAndPassword(secondaryAuth, normalizedEmail, tempPassword);
         provisionedUid = cred.user.uid;
         authProvisioned = true;

@@ -1,17 +1,44 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import {
   User,
+  EmailAuthProvider,
   onAuthStateChanged,
+  onIdTokenChanged,
   signInWithPopup,
   signInWithEmailAndPassword,
   sendPasswordResetEmail,
   updatePassword,
+  reauthenticateWithCredential,
+  fetchSignInMethodsForEmail,
   signOut,
 } from 'firebase/auth';
-import { auth, googleAuthProvider } from '../lib/firebase';
+import { auth, authPersistenceReady, googleAuthProvider } from '../lib/firebase';
+import {
+  extractFirebaseAuthCode,
+  formatEmailSignInError,
+  formatGoogleSignInError,
+  formatPasswordResetError,
+  formatSessionResolutionError,
+} from '../lib/authErrors';
 import { CompanySettings, Employee } from '../types/hr';
 import { completeFirstLoginPasswordChangeInApp, fetchMediaAsset, resolveEmployeeSession } from '../lib/hrService';
 import { syncReminderSnapshotToServer } from '../lib/pushService';
+
+export class ReauthRequiredError extends Error {
+  readonly requiresReauth = true;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ReauthRequiredError';
+  }
+}
+
+export class ProfileSyncPendingError extends Error {
+  readonly passwordAlreadyUpdatedInAuth = true;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProfileSyncPendingError';
+  }
+}
 
 interface AuthContextValue {
   firebaseUser: User | null;
@@ -20,10 +47,14 @@ interface AuthContextValue {
   companyLogoUrl: string | null;
   loading: boolean;
   authError: string | null;
+  clearAuthError: () => void;
   signInWithGoogle: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
   requestPasswordReset: (email: string) => Promise<void>;
-  completeFirstLoginPasswordChange: (newPassword: string) => Promise<void>;
+  completeFirstLoginPasswordChange: (
+    newPassword: string,
+    options?: { currentPassword?: string; skipAuthUpdate?: boolean }
+  ) => Promise<void>;
   logout: () => Promise<void>;
   refreshSession: () => Promise<void>;
 }
@@ -77,8 +108,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }).catch(() => {});
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Unable to verify company account.';
-      setAuthError(msg);
+      setAuthError(formatSessionResolutionError(err));
       setEmployee(null);
     } finally {
       setLoading(false);
@@ -86,39 +116,48 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (user) => {
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
       setFirebaseUser(user);
-      loadSession(user);
+      void loadSession(user);
     });
-    return () => unsub();
+    const unsubToken = onIdTokenChanged(auth, (user) => {
+      setFirebaseUser(user);
+    });
+    return () => {
+      unsubAuth();
+      unsubToken();
+    };
   }, [loadSession]);
+
+  const clearAuthError = useCallback(() => {
+    setAuthError(null);
+  }, []);
 
   const signInWithGoogle = async () => {
     setAuthError(null);
     try {
+      await authPersistenceReady;
       await signInWithPopup(auth, googleAuthProvider);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Google sign-in failed.';
-      setAuthError(msg);
+      setAuthError(formatGoogleSignInError(err));
       throw err;
     }
   };
 
   const signInWithEmail = async (email: string, password: string) => {
     setAuthError(null);
+    const cleanEmail = email.trim();
     try {
-      await signInWithEmailAndPassword(auth, email.trim(), password);
+      await authPersistenceReady;
+      await signInWithEmailAndPassword(auth, cleanEmail, password);
     } catch (err: unknown) {
-      const code = (err as { code?: string })?.code || '';
-      if (code === 'auth/operation-not-allowed') {
-        setAuthError('Email/Password sign-in is not enabled on Firebase Auth. Use Google Sign-In or enable Email/Password in Firebase Console.');
-      } else if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
-        setAuthError('Invalid work email or password. Repeated failed attempts may temporarily lock your account.');
-      } else if (code === 'auth/too-many-requests') {
-        setAuthError('Too many failed login attempts. Account temporarily locked for security. Please wait or reset your password.');
-      } else {
-        setAuthError(err instanceof Error ? err.message : 'Sign-in failed.');
+      const code = extractFirebaseAuthCode(err);
+      let signInMethods: string[] = [];
+      if (code === 'auth/invalid-credential' && cleanEmail) {
+        signInMethods = await fetchSignInMethodsForEmail(auth, cleanEmail).catch(() => []);
       }
+      const parsed = formatEmailSignInError(err, { signInMethods });
+      setAuthError(parsed.message);
       throw err;
     }
   };
@@ -128,31 +167,63 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       await sendPasswordResetEmail(auth, email.trim());
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Could not send password reset email.';
-      setAuthError(msg);
+      setAuthError(formatPasswordResetError(err));
       throw err;
     }
   };
 
-  const completeFirstLoginPasswordChange = async (newPassword: string) => {
+  const completeFirstLoginPasswordChange = async (
+    newPassword: string,
+    options?: { currentPassword?: string; skipAuthUpdate?: boolean }
+  ) => {
     const activeUser = auth.currentUser || firebaseUser;
     if (!activeUser || !employee) throw new Error('No active session');
-    try {
-      await updatePassword(activeUser, newPassword);
-    } catch (err: unknown) {
-      const code = (err as { code?: string })?.code || '';
-      if (code === 'auth/requires-recent-login') {
-        throw new Error('For your security, please click Sign Out, log back in with your temporary password, and set your new password immediately.');
+
+    if (!options?.skipAuthUpdate) {
+      if (options?.currentPassword && activeUser.email) {
+        try {
+          const cred = EmailAuthProvider.credential(activeUser.email, options.currentPassword);
+          await reauthenticateWithCredential(activeUser, cred);
+        } catch (reauthErr: unknown) {
+          const code = extractFirebaseAuthCode(reauthErr);
+          if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+            throw new Error('The current password you entered is incorrect.');
+          }
+          if (code === 'auth/too-many-requests') {
+            throw new Error('Too many failed verification attempts. Please wait a few minutes and try again.');
+          }
+          throw new Error(reauthErr instanceof Error ? reauthErr.message : 'Could not verify your current password.');
+        }
       }
-      if (code === 'auth/weak-password') {
-        throw new Error('Please choose a stronger password with at least 8 characters.');
+
+      try {
+        await updatePassword(activeUser, newPassword);
+      } catch (err: unknown) {
+        const code = extractFirebaseAuthCode(err);
+        if (code === 'auth/requires-recent-login') {
+          throw new ReauthRequiredError(
+            'For your security, please enter your current temporary password below to confirm your new password.'
+          );
+        }
+        if (code === 'auth/weak-password') {
+          throw new Error('Please choose a stronger password with at least 8 characters.');
+        }
+        throw err;
       }
-      throw err;
     }
 
     // updatePassword rotates auth refresh tokens; force-refresh the ID token before persisting profile state.
     await activeUser.getIdToken(true);
-    const resolvedEmployeeId = await completeFirstLoginPasswordChangeInApp(employee);
+    let resolvedEmployeeId: string;
+    try {
+      resolvedEmployeeId = await completeFirstLoginPasswordChangeInApp(employee);
+    } catch (syncErr: unknown) {
+      const detail = syncErr instanceof Error ? syncErr.message : 'Could not update profile status.';
+      throw new ProfileSyncPendingError(
+        `Your new password is saved in authentication, but workspace profile sync failed (${detail}). Click "Retry Sync" below to complete setup.`
+      );
+    }
+
     setEmployee((prev) =>
       prev ? { ...prev, id: resolvedEmployeeId || prev.id, mustChangePassword: false } : prev
     );
@@ -188,6 +259,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         companyLogoUrl,
         loading,
         authError,
+        clearAuthError,
         signInWithGoogle,
         signInWithEmail,
         requestPasswordReset,

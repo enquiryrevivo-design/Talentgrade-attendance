@@ -90,8 +90,21 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       return;
     }
   } catch (err) {
-    console.error('Token verification failed on /api/server-time:', err);
-    sendJson(res, 401, { error: 'Unauthorized: Invalid or expired session token' });
+    const code = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : '';
+    console.error('Token verification failed on /api/server-time:', code || err);
+    if (code === 'auth/id-token-expired') {
+      sendJson(res, 401, { error: 'Session token expired. Retrying...', code: 'TOKEN_EXPIRED' });
+      return;
+    }
+    if (code === 'auth/id-token-revoked') {
+      sendJson(res, 401, { error: 'Session was revoked. Please sign in again.', code: 'TOKEN_REVOKED' });
+      return;
+    }
+    if (code === 'auth/user-disabled') {
+      sendJson(res, 403, { error: 'Account disabled in Firebase Authentication.', code: 'USER_DISABLED' });
+      return;
+    }
+    sendJson(res, 401, { error: 'Unauthorized: Invalid or expired session token', code: 'INVALID_TOKEN' });
     return;
   }
 
