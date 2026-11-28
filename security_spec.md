@@ -9,6 +9,10 @@
 6. All `createdAt` and `updatedAt` timestamps on new documents and modifications must equal `request.time`.
 7. `auditLogs/{logId}` are append-only (no client update or delete permitted).
 8. Every authenticated write requires `request.auth.token.email_verified == true`.
+9. Expense claims (`expenses/{expenseId}`) may ONLY be created by the owning active employee for their assigned company in valid company currency (`INR` only for MyGrade; `INR` or `AED` for TalentGrade) with `status == 'Pending'`, can only be edited/deleted while `Pending`, and can only be Approved/Rejected (with mandatory reason) or Marked Paid by Super Admin or an authorized non-self Team Leader in the same company.
+10. Expense receipts (`mediaAssets` with `assetType == 'expense_receipt'`) are strictly private to the uploading employee, authorized reviewers, and Super Admin.
+11. Asset assignment records (`assetAssignments/{assignmentId}`) maintain an immutable audit trail (no client deletes); employees may ONLY update acknowledgment fields once on their own active assignment, and company deactivation/exit never auto-unassigns or deletes assets.
+12. Team Leaders / company-scoped managers are isolated to their assigned `companyId` for expenses and assets, while Super Admins oversee both TalentGrade and MyGrade.
 
 ## 2. The "Dirty Dozen" Attack Payloads (Must Return PERMISSION_DENIED)
 1. **Unauthenticated read/write**: Reading `/employees/emp1` without `request.auth`.
@@ -31,5 +35,9 @@
 18. **Duplicate Unresolved Regularization Lock Bypass**: Submitting a second `/regularizationLocks/{employeeId}_{date}_{requestType}` while a `Pending` request already holds that deterministic lock.
 19. **Cross-Employee Web Push Subscription Access**: Any user reading, listing, modifying, or deleting another employee's `/pushSubscriptions/{subId}` encryption keys or endpoint.
 20. **Unauthorized Reminder Settings or Audit Modification**: Non-Super-Admin modifying `companySettings.attendanceReminders` or tampering with existing `/attendanceReminderLogs/{logId}` entries.
-
+21. **Expense Self-Approval / Post-Approval Tampering**: Employee creating `/expenses/{id}` with `status: 'Approved'` or modifying `amount`/`status` on an `Approved`/`Paid` expense claim.
+22. **MyGrade Multi-Currency Violation**: Submitting `/expenses/{id}` or `/assets/{id}` for `companyId: 'mygrade'` with `currency: 'AED'`.
+23. **Cross-Employee Expense Receipt Snooping**: Employee A reading `/mediaAssets/{receiptId}` uploaded by Employee B with `assetType: 'expense_receipt'`.
+24. **Cross-Company Admin Access**: A Team Leader assigned to `mygrade` reading, approving, or modifying `/expenses/{id}` or `/assets/{id}` belonging to `talentgrade`.
+25. **Asset History Erasure / Unauthorized Return**: Any user deleting `/assetAssignments/{id}` or an employee modifying `returned: true` or `conditionOnAssign` on their assignment.
 

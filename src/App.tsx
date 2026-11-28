@@ -19,6 +19,8 @@ import { PayrollView } from './views/PayrollView';
 import { ReportsView } from './views/ReportsView';
 import { SettingsView } from './views/SettingsView';
 import { CelebrationsView } from './views/CelebrationsView';
+import { ExpensesView } from './views/ExpensesView';
+import { AssetsView } from './views/AssetsView';
 import { CelebrationProvider } from './context/CelebrationContext';
 import { HrNotificationProvider } from './context/HrNotificationContext';
 import { CelebrationWishModal } from './components/CelebrationWishModal';
@@ -28,6 +30,8 @@ const VALID_PAGES = new Set<AppPage>([
   'dashboard',
   'attendance',
   'leaves',
+  'expenses',
+  'assets',
   'employees',
   'payroll',
   'celebrations',
@@ -82,6 +86,10 @@ function AppRouter() {
         return <AttendanceView onNavigate={setActivePage} />;
       case 'leaves':
         return <LeavesView />;
+      case 'expenses':
+        return <ExpensesView />;
+      case 'assets':
+        return <AssetsView />;
       case 'employees':
         return employee.role === 'employee' ? <DashboardView onNavigate={setActivePage} /> : <EmployeesView />;
       case 'payroll':

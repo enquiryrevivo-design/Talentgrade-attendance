@@ -242,7 +242,7 @@
       "type": "object",
       "properties": {
         "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "assetType": { "type": "string", "enum": ["company_logo", "profile_photo", "attachment"] },
+        "assetType": { "type": "string", "enum": ["company_logo", "profile_photo", "attachment", "expense_receipt", "asset_photo"] },
         "fileName": { "type": "string", "minLength": 1, "maxLength": 160 },
         "mimeType": { "type": "string", "maxLength": 80 },
         "dataUrl": { "type": "string", "maxLength": 750000 },
@@ -709,6 +709,173 @@
         "sentAtIso": { "type": "string", "maxLength": 40 }
       },
       "required": ["dedupKey", "employeeId", "employeeUid", "employeeName", "department", "reminderType", "attendanceDate", "title", "body", "status", "sentAtIso"]
+    },
+    "ExpenseClaim": {
+      "title": "ExpenseClaim",
+      "description": "Employee expense reimbursement claim with multi-currency support, private receipt attachment, and approval/payment audit trail.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeCode": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "employeeName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "managerUid": { "type": "string", "maxLength": 128 },
+        "companyId": { "type": "string", "enum": ["talentgrade", "mygrade"] },
+        "category": {
+          "type": "string",
+          "enum": ["Travel", "Food / Meals", "Internet", "Fuel", "Accommodation", "Office expenses", "Medical expenses", "Other"]
+        },
+        "amount": { "type": "number" },
+        "currency": { "type": "string", "enum": ["INR", "AED"] },
+        "expenseDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "description": { "type": "string", "minLength": 3, "maxLength": 500 },
+        "notes": { "type": "string", "maxLength": 500 },
+        "receiptAssetId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "receiptFileName": { "type": "string", "maxLength": 160 },
+        "receiptMimeType": { "type": "string", "maxLength": 80 },
+        "status": { "type": "string", "enum": ["Pending", "Approved", "Rejected", "Paid"] },
+        "reviewedByUid": { "type": "string", "maxLength": 128 },
+        "reviewedByName": { "type": "string", "maxLength": 120 },
+        "reviewedAtIso": { "type": "string", "maxLength": 40 },
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "approvalNote": { "type": "string", "maxLength": 500 },
+        "rejectionReason": { "type": "string", "maxLength": 500 },
+        "paidByUid": { "type": "string", "maxLength": 128 },
+        "paidByName": { "type": "string", "maxLength": 120 },
+        "paidAtIso": { "type": "string", "maxLength": 40 },
+        "paidAt": { "type": "string", "format": "date-time" },
+        "paymentReference": { "type": "string", "maxLength": 120 },
+        "paymentNote": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "employeeId",
+        "employeeUid",
+        "employeeCode",
+        "employeeName",
+        "department",
+        "companyId",
+        "category",
+        "amount",
+        "currency",
+        "expenseDate",
+        "description",
+        "receiptAssetId",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CompanyAsset": {
+      "title": "CompanyAsset",
+      "description": "Company IT and operational asset inventory record isolated by company and tracked across assignment lifecycle.",
+      "type": "object",
+      "properties": {
+        "assetTag": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "category": {
+          "type": "string",
+          "enum": ["Laptop", "Desktop", "Mobile phone", "SIM card", "Headset", "Monitor", "Keyboard", "Mouse", "ID card", "Access card", "Office equipment", "Other"]
+        },
+        "brand": { "type": "string", "maxLength": 80 },
+        "model": { "type": "string", "maxLength": 80 },
+        "serialNumber": { "type": "string", "maxLength": 100 },
+        "purchaseDate": { "type": "string", "maxLength": 10 },
+        "purchaseCost": { "type": "number" },
+        "currency": { "type": "string", "enum": ["INR", "AED"] },
+        "warrantyExpiry": { "type": "string", "maxLength": 10 },
+        "condition": { "type": "string", "enum": ["New", "Good", "Fair", "Damaged", "Needs Repair"] },
+        "status": { "type": "string", "enum": ["Available", "Assigned", "Under repair", "Lost", "Retired"] },
+        "companyId": { "type": "string", "enum": ["talentgrade", "mygrade"] },
+        "notes": { "type": "string", "maxLength": 500 },
+        "photoAssetId": { "type": "string", "maxLength": 128 },
+        "currentAssignmentId": { "type": "string", "maxLength": 128 },
+        "assignedToEmployeeId": { "type": "string", "maxLength": 128 },
+        "assignedToEmployeeUid": { "type": "string", "maxLength": 128 },
+        "assignedToEmployeeName": { "type": "string", "maxLength": 120 },
+        "assignedAtIso": { "type": "string", "maxLength": 40 },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdByName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "assetTag",
+        "name",
+        "category",
+        "condition",
+        "status",
+        "companyId",
+        "createdByUid",
+        "createdByName",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AssetAssignment": {
+      "title": "AssetAssignment",
+      "description": "Immutable assignment, employee receipt acknowledgment, and return history record for company assets.",
+      "type": "object",
+      "properties": {
+        "assetId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "assetTag": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "assetName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "assetCategory": {
+          "type": "string",
+          "enum": ["Laptop", "Desktop", "Mobile phone", "SIM card", "Headset", "Monitor", "Keyboard", "Mouse", "ID card", "Access card", "Office equipment", "Other"]
+        },
+        "serialNumber": { "type": "string", "maxLength": 100 },
+        "photoAssetId": { "type": "string", "maxLength": 128 },
+        "companyId": { "type": "string", "enum": ["talentgrade", "mygrade"] },
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "employeeUid": { "type": "string", "maxLength": 128 },
+        "employeeCode": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "employeeName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "managerUid": { "type": "string", "maxLength": 128 },
+        "assignedDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "assignedByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "assignedByName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "conditionOnAssign": { "type": "string", "enum": ["New", "Good", "Fair", "Damaged", "Needs Repair"] },
+        "assignRemarks": { "type": "string", "maxLength": 500 },
+        "acknowledged": { "type": "boolean" },
+        "acknowledgedByUid": { "type": "string", "maxLength": 128 },
+        "acknowledgedByName": { "type": "string", "maxLength": 120 },
+        "acknowledgedAtIso": { "type": "string", "maxLength": 40 },
+        "acknowledgedAt": { "type": "string", "format": "date-time" },
+        "acknowledgmentStatement": { "type": "string", "maxLength": 300 },
+        "returned": { "type": "boolean" },
+        "returnDate": { "type": "string", "maxLength": 10 },
+        "returnCondition": { "type": "string", "enum": ["New", "Good", "Fair", "Damaged", "Needs Repair"] },
+        "returnRemarks": { "type": "string", "maxLength": 500 },
+        "returnedByAdminUid": { "type": "string", "maxLength": 128 },
+        "returnedByAdminName": { "type": "string", "maxLength": 120 },
+        "returnedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "assetId",
+        "assetTag",
+        "assetName",
+        "assetCategory",
+        "companyId",
+        "employeeId",
+        "employeeUid",
+        "employeeCode",
+        "employeeName",
+        "department",
+        "assignedDate",
+        "assignedByUid",
+        "assignedByName",
+        "conditionOnAssign",
+        "acknowledged",
+        "returned",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -795,6 +962,18 @@
     "/attendanceReminderLogs/{logId}": {
       "schema": { "$ref": "#/entities/AttendanceReminderLog" },
       "description": "Smart Attendance Reminders delivery log and audit history."
+    },
+    "/expenses/{expenseId}": {
+      "schema": { "$ref": "#/entities/ExpenseClaim" },
+      "description": "Employee expense reimbursement claims, approvals, rejections, and payout statuses."
+    },
+    "/assets/{assetId}": {
+      "schema": { "$ref": "#/entities/CompanyAsset" },
+      "description": "Company asset inventory registry with status and active assignment pointers."
+    },
+    "/assetAssignments/{assignmentId}": {
+      "schema": { "$ref": "#/entities/AssetAssignment" },
+      "description": "Immutable asset assignment, employee acknowledgment, and return history records."
     }
   }
 }

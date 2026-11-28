@@ -12,10 +12,14 @@ import {
   SlidersHorizontal,
   Trash2,
   AlertTriangle,
+  Laptop,
+  CheckCircle2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../components/Toast';
 import {
+  AssetAssignment,
+  AttendanceCorrection,
   AttendanceRecord,
   CompanyId,
   Department,
@@ -28,6 +32,7 @@ import {
   UserRole,
 } from '../types/hr';
 import { CompanyBadge } from '../components/CompanyBadge';
+import { WorkingHoursAnalytics } from '../components/WorkingHoursAnalytics';
 import {
   adjustEmployeeLeaveBalance,
   BOOTSTRAPPED_ADMIN_EMAIL,
@@ -40,7 +45,9 @@ import {
   fetchLeaveApplications,
   fetchLeaveLedger,
   fetchMediaAsset,
+  formatDurationMinutes,
   formatMoney,
+  formatTimeDisplay,
   getDepartments,
   getEffectiveSchedule,
   getTodayInTimezone,
@@ -49,6 +56,8 @@ import {
   updateEmployeeProfile,
   uploadMediaAsset,
 } from '../lib/hrService';
+import { fetchAttendanceRegularizations } from '../lib/regularizationService';
+import { computeEmployeeAssetClearance, fetchAssetAssignments } from '../lib/assetService';
 import {
   calculateCasualLeaveEligibilityDate,
   computeEmployeeLeaveAccrualPlan,
@@ -147,6 +156,8 @@ export function EmployeesView() {
   const [selectedEmp, setSelectedEmp] = useState<Employee | null>(null);
   const [profileTab, setProfileTab] = useState<'profile' | 'attendance' | 'leave' | 'payroll'>('profile');
   const [empAttendance, setEmpAttendance] = useState<AttendanceRecord[]>([]);
+  const [empApprovedCorrections, setEmpApprovedCorrections] = useState<AttendanceCorrection[]>([]);
+  const [empAssetAssignments, setEmpAssetAssignments] = useState<AssetAssignment[]>([]);
   const [empLeaves, setEmpLeaves] = useState<LeaveApplication[]>([]);
   const [empLedger, setEmpLedger] = useState<LeaveLedgerEntry[]>([]);
   const [empSalary, setEmpSalary] = useState<EmployeeSalary | null>(null);
@@ -387,12 +398,22 @@ export function EmployeesView() {
 
     try {
       const canViewAll = settings?.teamLeaderPermissions?.canViewAllEmployees ?? true;
-      const [allAtt, allLeaves, allLedger] = await Promise.all([
+      const canApproveCor =
+        isSuperAdmin || Boolean(settings?.teamLeaderPermissions?.canApproveCorrections);
+      const canManageAssets =
+        isSuperAdmin || Boolean(settings?.teamLeaderPermissions?.canManageAssets);
+      const [allAtt, allLeaves, allLedger, allCorrections, allAssignments] = await Promise.all([
         fetchAttendanceRecords(employee, undefined, canViewAll),
         fetchLeaveApplications(employee),
         fetchLeaveLedger(employee),
+        fetchAttendanceRegularizations(employee, canApproveCor).catch(() => []),
+        fetchAssetAssignments(employee, canManageAssets, canViewAll).catch(() => []),
       ]);
-      setEmpAttendance(allAtt.filter((a) => a.employeeId === emp.id).slice(0, 30));
+      setEmpAttendance(allAtt.filter((a) => a.employeeId === emp.id));
+      setEmpApprovedCorrections(
+        allCorrections.filter((c) => c.employeeId === emp.id && c.status === 'Approved')
+      );
+      setEmpAssetAssignments(allAssignments.filter((asg) => asg.employeeId === emp.id));
       setEmpLeaves(allLeaves.filter((l) => l.employeeId === emp.id));
       setEmpLedger(allLedger.filter((x) => x.employeeId === emp.id));
 
@@ -1986,6 +2007,71 @@ export function EmployeesView() {
                     </div>
                   </div>
 
+                  {(() => {
+                    const effectiveStatus = editForm.status || selectedEmp.status;
+                    const clearance = computeEmployeeAssetClearance(selectedEmp.id, empAssetAssignments);
+                    const isExitState =
+                      effectiveStatus === 'Resigned' ||
+                      effectiveStatus === 'Terminated' ||
+                      effectiveStatus === 'Inactive';
+                    if (!isExitState && clearance.assignments.length === 0) return null;
+                    return (
+                      <div className="p-4 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-950/60 space-y-2.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="inline-flex items-center gap-1.5 font-semibold text-zinc-950 dark:text-zinc-100">
+                            <Laptop className="w-3.5 h-3.5 text-[#B5121B]" />
+                            {isExitState ? 'Exit Asset Clearance Checklist' : 'Assigned Company Assets'}
+                          </span>
+                          <span
+                            className={`px-2.5 py-0.5 rounded-md text-[11px] font-semibold ${
+                              clearance.clearanceStatus === 'Pending Return'
+                                ? 'bg-red-50 text-[#B5121B] border border-red-200 dark:bg-red-950/40 dark:text-red-300 dark:border-red-900'
+                                : clearance.clearanceStatus === 'Cleared'
+                                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-900'
+                                : 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300'
+                            }`}
+                          >
+                            {clearance.clearanceStatus}
+                          </span>
+                        </div>
+                        {clearance.currentlyAssigned.length > 0 ? (
+                          <div className="space-y-1.5">
+                            <div className="text-[11px] text-[#B5121B] dark:text-red-400 font-medium">
+                              Pending Return ({clearance.currentlyAssigned.length}):
+                            </div>
+                            {clearance.currentlyAssigned.map((asg) => (
+                              <div
+                                key={asg.id}
+                                className="px-3 py-2 rounded-lg bg-white dark:bg-zinc-900 border border-amber-200 dark:border-amber-900/60 flex items-center justify-between gap-2 text-[11px]"
+                              >
+                                <span>
+                                  <span className="font-mono font-bold">{asg.assetTag}</span> · {asg.assetName} ({asg.assetCategory})
+                                </span>
+                                <span className="font-mono text-zinc-500">Assigned {asg.assignedDate}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1.5">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            All assigned company assets have been returned or none assigned.
+                          </div>
+                        )}
+                        {clearance.returned.length > 0 && (
+                          <div className="text-[11px] text-zinc-500">
+                            Returned ({clearance.returned.length}):{' '}
+                            {clearance.returned.map((r) => `${r.assetTag} (${r.returnDate})`).join(', ')}
+                          </div>
+                        )}
+                        {isExitState && (
+                          <p className="text-[10px] text-zinc-500">
+                            Assigned assets remain linked to this employee until formally processed via Assets → Return / Exit Clearance.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
+
                   {isSuperAdmin && (
                     <div className="flex flex-wrap items-center justify-between gap-3 pt-3">
                       <div className="flex flex-wrap items-center gap-2">
@@ -2021,20 +2107,37 @@ export function EmployeesView() {
               )}
 
               {profileTab === 'attendance' && (
-                <div className="space-y-2">
-                  {empAttendance.length === 0 ? (
-                    <p className="text-zinc-500">No recent attendance records found.</p>
-                  ) : (
-                    empAttendance.map((a) => (
-                      <div key={a.id} className="p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 flex items-center justify-between">
-                        <div>
-                          <div className="font-mono font-semibold">{a.date}</div>
-                          <div className="text-zinc-500">{a.notes || a.timezone || 'Standard log'}</div>
+                <div className="space-y-5">
+                  <WorkingHoursAnalytics
+                    targetEmployee={selectedEmp}
+                    attendanceRecords={empAttendance}
+                    approvedCorrections={empApprovedCorrections}
+                    settings={settings}
+                    compact
+                  />
+
+                  <div className="space-y-2">
+                    <div className="font-semibold text-zinc-950 dark:text-zinc-100">
+                      Recent Attendance Logs ({Math.min(20, empAttendance.length)})
+                    </div>
+                    {empAttendance.length === 0 ? (
+                      <p className="text-zinc-500">No recent attendance records found.</p>
+                    ) : (
+                      empAttendance.slice(0, 20).map((a) => (
+                        <div key={a.id} className="p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 flex items-center justify-between gap-2">
+                          <div>
+                            <div className="font-mono font-semibold">{a.date}</div>
+                            <div className="text-zinc-500 font-mono">
+                              {formatTimeDisplay(a.punchInTime, a.timezone || 'Asia/Kolkata')} →{' '}
+                              {formatTimeDisplay(a.punchOutTime, a.timezone || 'Asia/Kolkata')} ·{' '}
+                              {formatDurationMinutes(a.workingMinutes)}
+                            </div>
+                          </div>
+                          <span className="font-medium">{a.status}</span>
                         </div>
-                        <span className="font-medium">{a.status}</span>
-                      </div>
-                    ))
-                  )}
+                      ))
+                    )}
+                  </div>
                 </div>
               )}
 

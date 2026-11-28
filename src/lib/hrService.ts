@@ -429,6 +429,8 @@ export async function bootstrapCompanyAndAdmin(user: User): Promise<{
         canApproveCorrections: true,
         canApproveLeaves: true,
         canViewSalary: false,
+        canApproveExpenses: false,
+        canManageAssets: false,
       },
       updatedBy: user.uid,
     };
@@ -1862,7 +1864,7 @@ export async function deleteAttendancePhoto(photoId: string, actor: Employee): P
 
 export async function uploadMediaAsset(params: {
   ownerUid: string;
-  assetType: 'company_logo' | 'profile_photo' | 'attachment';
+  assetType: MediaAsset['assetType'];
   fileName: string;
   mimeType: string;
   dataUrl: string;
@@ -1880,6 +1882,15 @@ export async function uploadMediaAsset(params: {
     return id;
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, `mediaAssets/${id}`);
+  }
+}
+
+export async function deleteMediaAsset(assetId: string): Promise<void> {
+  if (!assetId) return;
+  try {
+    await deleteDoc(doc(db, 'mediaAssets', assetId));
+  } catch (err) {
+    console.warn('Media asset cleanup warning:', err);
   }
 }
 

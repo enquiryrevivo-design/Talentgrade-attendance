@@ -13,6 +13,8 @@ import {
   Menu,
   X,
   Cake,
+  Wallet,
+  Laptop,
 } from 'lucide-react';
 import { AppPage, normalizeCompanyId, resolveCompanyProfile, UserRole } from '../types/hr';
 import { useAuth } from '../context/AuthContext';
@@ -35,6 +37,8 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'attendance', label: 'Attendance', icon: Clock, roles: ['super_admin', 'team_leader', 'employee'] },
   { id: 'leaves', label: 'Leaves', icon: CalendarDays, roles: ['super_admin', 'team_leader', 'employee'] },
   { id: 'employees', label: 'Employees', icon: Users, roles: ['super_admin', 'team_leader'] },
+  { id: 'expenses', label: 'Expenses', icon: Wallet, roles: ['super_admin', 'team_leader', 'employee'] },
+  { id: 'assets', label: 'Assets', icon: Laptop, roles: ['super_admin', 'team_leader', 'employee'] },
   { id: 'payroll', label: 'Payroll', icon: Receipt, roles: ['super_admin', 'employee', 'team_leader'] },
   { id: 'celebrations', label: 'Celebrations', icon: Cake, roles: ['super_admin', 'team_leader', 'employee'] },
   { id: 'reports', label: 'Reports', icon: BarChart3, roles: ['super_admin', 'team_leader'] },

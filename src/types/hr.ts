@@ -72,7 +72,22 @@ export {
   type SupportedCurrency,
 } from '../../shared/companyConfig';
 
-import type { CompanyId, CompanyProfileConfig } from '../../shared/companyConfig';
+export {
+  buildWorkingHoursAnalytics,
+  computeStrictPunchDurationMinutes,
+  formatMinutesAsHoursLabel,
+  resolveAnalyticsDateRange,
+  type BuildWorkingHoursAnalyticsInput,
+  type DailyWorkingHoursPoint,
+  type MonthlyWorkingHoursBucket,
+  type WeeklyWorkingHoursBucket,
+  type WorkingHoursAnalyticsResult,
+  type WorkingHoursAnalyticsSummary,
+  type WorkingHoursDayExtremum,
+  type WorkingHoursRangePreset,
+} from '../../shared/workingHoursEngine';
+
+import type { CompanyId, CompanyProfileConfig, SupportedCurrency } from '../../shared/companyConfig';
 import type { LeavePolicyConfig, LeaveType } from '../../shared/leaveAccrualEngine';
 import type {
   CelebrationSettings,
@@ -102,6 +117,8 @@ export interface TeamLeaderPermissions {
   canApproveCorrections: boolean;
   canApproveLeaves: boolean;
   canViewSalary: boolean;
+  canApproveExpenses?: boolean;
+  canManageAssets?: boolean;
 }
 
 export interface CompanySettings {
@@ -252,7 +269,7 @@ export interface AttendancePhoto {
 export interface MediaAsset {
   id: string;
   ownerUid: string;
-  assetType: 'company_logo' | 'profile_photo' | 'attachment';
+  assetType: 'company_logo' | 'profile_photo' | 'attachment' | 'expense_receipt' | 'asset_photo';
   fileName: string;
   mimeType: string;
   dataUrl: string;
@@ -459,10 +476,164 @@ export interface CelebrationWish {
   createdAt?: unknown;
 }
 
+export const EXPENSE_CATEGORIES = [
+  'Travel',
+  'Food / Meals',
+  'Internet',
+  'Fuel',
+  'Accommodation',
+  'Office expenses',
+  'Medical expenses',
+  'Other',
+] as const;
+
+export type ExpenseCategory = (typeof EXPENSE_CATEGORIES)[number];
+
+export type ExpenseStatus = 'Pending' | 'Approved' | 'Rejected' | 'Paid';
+
+export interface ExpenseClaim {
+  id: string;
+  employeeId: string;
+  employeeUid: string;
+  employeeCode: string;
+  employeeName: string;
+  department: string;
+  managerUid?: string;
+  companyId: CompanyId;
+  category: ExpenseCategory;
+  amount: number;
+  currency: SupportedCurrency;
+  expenseDate: string; // YYYY-MM-DD
+  description: string;
+  notes?: string;
+  receiptAssetId: string;
+  receiptFileName?: string;
+  receiptMimeType?: string;
+  status: ExpenseStatus;
+  reviewedByUid?: string;
+  reviewedByName?: string;
+  reviewedAtIso?: string;
+  reviewedAt?: unknown;
+  approvalNote?: string;
+  rejectionReason?: string;
+  paidByUid?: string;
+  paidByName?: string;
+  paidAtIso?: string;
+  paidAt?: unknown;
+  paymentReference?: string;
+  paymentNote?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export const ASSET_CATEGORIES = [
+  'Laptop',
+  'Desktop',
+  'Mobile phone',
+  'SIM card',
+  'Headset',
+  'Monitor',
+  'Keyboard',
+  'Mouse',
+  'ID card',
+  'Access card',
+  'Office equipment',
+  'Other',
+] as const;
+
+export type AssetCategory = (typeof ASSET_CATEGORIES)[number];
+
+export const ASSET_STATUSES = [
+  'Available',
+  'Assigned',
+  'Under repair',
+  'Lost',
+  'Retired',
+] as const;
+
+export type AssetStatus = (typeof ASSET_STATUSES)[number];
+
+export const ASSET_CONDITIONS = [
+  'New',
+  'Good',
+  'Fair',
+  'Damaged',
+  'Needs Repair',
+] as const;
+
+export type AssetCondition = (typeof ASSET_CONDITIONS)[number];
+
+export interface CompanyAsset {
+  id: string;
+  assetTag: string;
+  name: string;
+  category: AssetCategory;
+  brand?: string;
+  model?: string;
+  serialNumber?: string;
+  purchaseDate?: string;
+  purchaseCost?: number;
+  currency?: SupportedCurrency;
+  warrantyExpiry?: string;
+  condition: AssetCondition;
+  status: AssetStatus;
+  companyId: CompanyId;
+  notes?: string;
+  photoAssetId?: string;
+  currentAssignmentId?: string;
+  assignedToEmployeeId?: string;
+  assignedToEmployeeUid?: string;
+  assignedToEmployeeName?: string;
+  assignedAtIso?: string;
+  createdByUid: string;
+  createdByName: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface AssetAssignment {
+  id: string;
+  assetId: string;
+  assetTag: string;
+  assetName: string;
+  assetCategory: AssetCategory;
+  serialNumber?: string;
+  photoAssetId?: string;
+  companyId: CompanyId;
+  employeeId: string;
+  employeeUid: string;
+  employeeCode: string;
+  employeeName: string;
+  department: string;
+  managerUid?: string;
+  assignedDate: string; // YYYY-MM-DD
+  assignedByUid: string;
+  assignedByName: string;
+  conditionOnAssign: AssetCondition;
+  assignRemarks?: string;
+  acknowledged: boolean;
+  acknowledgedByUid?: string;
+  acknowledgedByName?: string;
+  acknowledgedAtIso?: string;
+  acknowledgedAt?: unknown;
+  acknowledgmentStatement?: string;
+  returned: boolean;
+  returnDate?: string;
+  returnCondition?: AssetCondition;
+  returnRemarks?: string;
+  returnedByAdminUid?: string;
+  returnedByAdminName?: string;
+  returnedAt?: unknown;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
 export type AppPage =
   | 'dashboard'
   | 'attendance'
   | 'leaves'
+  | 'expenses'
+  | 'assets'
   | 'employees'
   | 'payroll'
   | 'celebrations'

@@ -14,12 +14,14 @@ import {
   Paperclip,
   Clock,
   Filter,
+  BarChart3,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useHrNotifications } from '../context/HrNotificationContext';
 import { useToast } from '../components/Toast';
 import { CameraCaptureModal } from '../components/CameraCaptureModal';
 import { SmartAttendanceRemindersCard } from '../components/SmartAttendanceRemindersCard';
+import { WorkingHoursAnalytics } from '../components/WorkingHoursAnalytics';
 import {
   AppPage,
   AttendanceCorrection,
@@ -138,7 +140,7 @@ export function AttendanceView({ onNavigate }: { onNavigate?: (page: AppPage) =>
   const yesterdayStr = useMemo(() => getYesterdayDateStr(todayStr), [todayStr]);
 
   const [selectedMonth, setSelectedMonth] = useState(todayStr.slice(0, 7));
-  const [viewMode, setViewMode] = useState<'list' | 'calendar'>('list');
+  const [viewMode, setViewMode] = useState<'list' | 'calendar' | 'analytics'>('list');
   const [selectedEmpFilter, setSelectedEmpFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
 
@@ -596,8 +598,32 @@ export function AttendanceView({ onNavigate }: { onNavigate?: (page: AppPage) =>
             <CalendarIcon className="w-3.5 h-3.5" />
             Calendar
           </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('analytics')}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium ${
+              viewMode === 'analytics'
+                ? 'bg-white dark:bg-zinc-900 text-zinc-950 dark:text-zinc-100 shadow-sm'
+                : 'text-zinc-600 dark:text-zinc-400'
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            Working Hours
+          </button>
         </div>
       </div>
+
+      {/* Working Hours Graph View */}
+      {viewMode === 'analytics' && (
+        <WorkingHoursAnalytics
+          targetEmployee={calendarTargetEmp}
+          attendanceRecords={records.filter((r) => r.employeeId === calendarTargetEmpId)}
+          approvedCorrections={regularizations.filter(
+            (c) => c.employeeId === calendarTargetEmpId && c.status === 'Approved'
+          )}
+          settings={settings}
+        />
+      )}
 
       {/* Calendar View */}
       {viewMode === 'calendar' && (

@@ -3,6 +3,7 @@ import { Download } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../components/Toast';
 import {
+  AttendanceCorrection,
   AttendanceRecord,
   CompanyId,
   Department,
@@ -13,6 +14,7 @@ import {
   PayrollRecord,
 } from '../types/hr';
 import { CompanyBadge } from '../components/CompanyBadge';
+import { WorkingHoursAnalytics } from '../components/WorkingHoursAnalytics';
 import {
   exportToCsv,
   fetchAllEmployees,
@@ -26,6 +28,7 @@ import {
   getEffectiveSchedule,
   getTodayInTimezone,
 } from '../lib/hrService';
+import { fetchAttendanceRegularizations } from '../lib/regularizationService';
 
 export function ReportsView() {
   const { employee, settings } = useAuth();
@@ -49,8 +52,10 @@ export function ReportsView() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
+  const [corrections, setCorrections] = useState<AttendanceCorrection[]>([]);
   const [leaves, setLeaves] = useState<LeaveApplication[]>([]);
   const [payrolls, setPayrolls] = useState<PayrollRecord[]>([]);
+  const [selectedAnalyticsEmpId, setSelectedAnalyticsEmpId] = useState('');
   const [loading, setLoading] = useState(true);
 
   const loadData = useCallback(async () => {
@@ -58,19 +63,23 @@ export function ReportsView() {
     setLoading(true);
     try {
       const canViewAll = settings.teamLeaderPermissions.canViewAllEmployees;
+      const canApproveCor =
+        employee.role === 'super_admin' || Boolean(settings.teamLeaderPermissions.canApproveCorrections);
       const canPayroll =
         employee.role === 'super_admin' ||
         (employee.role === 'team_leader' && settings.teamLeaderPermissions.canViewSalary);
-      const [empList, deptList, attList, leaveList, payList] = await Promise.all([
+      const [empList, deptList, attList, corList, leaveList, payList] = await Promise.all([
         fetchAllEmployees(employee, canViewAll),
         getDepartments(),
         fetchAttendanceRecords(employee, undefined, canViewAll),
+        fetchAttendanceRegularizations(employee, canApproveCor).catch(() => []),
         fetchLeaveApplications(employee),
         canPayroll ? fetchPayrollRecords(employee, canPayroll) : Promise.resolve([]),
       ]);
       setEmployees(empList);
       setDepartments(deptList);
       setAttendance(attList);
+      setCorrections(corList.filter((c) => c.status === 'Approved'));
       setLeaves(leaveList);
       setPayrolls(payList);
     } catch (err: unknown) {
@@ -787,6 +796,45 @@ export function ReportsView() {
           </div>
         )}
       </section>
+
+      {/* Interactive Employee Working Hours History Graph */}
+      {category === 'attendance' && !loading && deptEmployees.length > 0 && (() => {
+        const activeEmp =
+          deptEmployees.find((e) => e.id === selectedAnalyticsEmpId) || deptEmployees[0];
+        const empAtt = attendance.filter((a) => a.employeeId === activeEmp.id);
+        const empCor = corrections.filter((c) => c.employeeId === activeEmp.id);
+        return (
+          <section className="space-y-3">
+            <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div>
+                <h2 className="text-sm font-semibold text-zinc-950 dark:text-zinc-100">
+                  Employee Working Hours History Graph
+                </h2>
+                <p className="text-[11px] text-zinc-500 mt-0.5">
+                  Select an employee to analyze daily, weekly, and monthly verified working hours
+                </p>
+              </div>
+              <select
+                value={activeEmp.id}
+                onChange={(e) => setSelectedAnalyticsEmpId(e.target.value)}
+                className="min-h-[38px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 font-medium"
+              >
+                {deptEmployees.map((emp) => (
+                  <option key={emp.id} value={emp.id}>
+                    {emp.fullName} ({emp.employeeCode}) · {getCompanyShortName(emp.companyId)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <WorkingHoursAnalytics
+              targetEmployee={activeEmp}
+              attendanceRecords={empAtt}
+              approvedCorrections={empCor}
+              settings={settings}
+            />
+          </section>
+        );
+      })()}
     </div>
   );
 }

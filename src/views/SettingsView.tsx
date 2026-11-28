@@ -135,7 +135,11 @@ export function SettingsView() {
         celebrationSettings: normalizeCelebrationSettings(settings.celebrationSettings),
         attendanceReminders: normalizeAttendanceReminderSettings(settings.attendanceReminders),
         currency: settings.currency || 'INR',
-        teamLeaderPermissions: { ...settings.teamLeaderPermissions },
+        teamLeaderPermissions: {
+          ...settings.teamLeaderPermissions,
+          canApproveExpenses: Boolean(settings.teamLeaderPermissions?.canApproveExpenses),
+          canManageAssets: Boolean(settings.teamLeaderPermissions?.canManageAssets),
+        },
       });
 
       // Load custom company logos for TalentGrade and MyGrade
@@ -1140,6 +1144,16 @@ export function SettingsView() {
                 key: 'canViewSalary',
                 title: 'Access Employee Salary & Payroll Reports (Restricted by Default)',
                 desc: 'Disabled by default. Enable only if Team Leaders should inspect salary figures.',
+              },
+              {
+                key: 'canApproveExpenses',
+                title: 'Approve & Mark Paid Company Expense Claims',
+                desc: 'Allows reviewing, approving/rejecting, and marking paid expense claims within their assigned company.',
+              },
+              {
+                key: 'canManageAssets',
+                title: 'Manage Company Assets & Exit Clearance',
+                desc: 'Allows registering, assigning, and processing asset returns within their assigned company.',
               },
             ] as const
           ).map((item) => (

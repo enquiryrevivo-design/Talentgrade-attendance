@@ -286,7 +286,7 @@ service cloud.firestore {
       return data.keys().hasAll(['ownerUid', 'assetType', 'fileName', 'mimeType', 'dataUrl', 'createdAt']) &&
         data.keys().hasOnly(['ownerUid', 'assetType', 'fileName', 'mimeType', 'dataUrl', 'createdAt']) &&
         isStringSize(data.ownerUid, 1, 128) &&
-        data.assetType in ['company_logo', 'profile_photo', 'attachment'] &&
+        data.assetType in ['company_logo', 'profile_photo', 'attachment', 'expense_receipt', 'asset_photo'] &&
         isStringSize(data.fileName, 1, 160) &&
         isStringSize(data.mimeType, 3, 80) &&
         isStringSize(data.dataUrl, 10, 750000) &&
@@ -658,6 +658,148 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/employees/$(get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.employeeId)).data.department;
     }
 
+    function getCallerCompanyId() {
+      return get(/databases/$(database)/documents/employees/$(get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.employeeId)).data.get('companyId', 'talentgrade');
+    }
+
+    function isValidExpenseClaim(data) {
+      return data.keys().hasAll([
+          'employeeId', 'employeeUid', 'employeeCode', 'employeeName', 'department',
+          'companyId', 'category', 'amount', 'currency', 'expenseDate', 'description',
+          'receiptAssetId', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'employeeId', 'employeeUid', 'employeeCode', 'employeeName', 'department',
+          'managerUid', 'companyId', 'category', 'amount', 'currency', 'expenseDate',
+          'description', 'notes', 'receiptAssetId', 'receiptFileName', 'receiptMimeType',
+          'status', 'reviewedByUid', 'reviewedByName', 'reviewedAtIso', 'reviewedAt',
+          'approvalNote', 'rejectionReason', 'paidByUid', 'paidByName', 'paidAtIso',
+          'paidAt', 'paymentReference', 'paymentNote', 'createdAt', 'updatedAt'
+        ]) &&
+        isStringSize(data.employeeId, 1, 128) &&
+        isStringSize(data.employeeUid, 1, 128) &&
+        isStringSize(data.employeeCode, 1, 40) &&
+        isStringSize(data.employeeName, 1, 120) &&
+        isStringSize(data.department, 1, 80) &&
+        isOptionalStringSize(data, 'managerUid', 128) &&
+        data.companyId in ['talentgrade', 'mygrade'] &&
+        data.category in ['Travel', 'Food / Meals', 'Internet', 'Fuel', 'Accommodation', 'Office expenses', 'Medical expenses', 'Other'] &&
+        data.amount is number && data.amount > 0 && data.amount <= 10000000 &&
+        data.currency in ['INR', 'AED'] &&
+        (data.companyId != 'mygrade' || data.currency == 'INR') &&
+        data.expenseDate is string && data.expenseDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+        isStringSize(data.description, 3, 500) &&
+        isOptionalStringSize(data, 'notes', 500) &&
+        isStringSize(data.receiptAssetId, 1, 128) &&
+        isOptionalStringSize(data, 'receiptFileName', 160) &&
+        isOptionalStringSize(data, 'receiptMimeType', 80) &&
+        data.status in ['Pending', 'Approved', 'Rejected', 'Paid'] &&
+        isOptionalStringSize(data, 'reviewedByUid', 128) &&
+        isOptionalStringSize(data, 'reviewedByName', 120) &&
+        isOptionalStringSize(data, 'reviewedAtIso', 40) &&
+        (!( 'reviewedAt' in data ) || data.reviewedAt is timestamp) &&
+        isOptionalStringSize(data, 'approvalNote', 500) &&
+        isOptionalStringSize(data, 'rejectionReason', 500) &&
+        isOptionalStringSize(data, 'paidByUid', 128) &&
+        isOptionalStringSize(data, 'paidByName', 120) &&
+        isOptionalStringSize(data, 'paidAtIso', 40) &&
+        (!( 'paidAt' in data ) || data.paidAt is timestamp) &&
+        isOptionalStringSize(data, 'paymentReference', 120) &&
+        isOptionalStringSize(data, 'paymentNote', 500) &&
+        data.createdAt is timestamp &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidCompanyAsset(data) {
+      return data.keys().hasAll([
+          'assetTag', 'name', 'category', 'condition', 'status', 'companyId',
+          'createdByUid', 'createdByName', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'assetTag', 'name', 'category', 'brand', 'model', 'serialNumber',
+          'purchaseDate', 'purchaseCost', 'currency', 'warrantyExpiry', 'condition',
+          'status', 'companyId', 'notes', 'photoAssetId', 'currentAssignmentId',
+          'assignedToEmployeeId', 'assignedToEmployeeUid', 'assignedToEmployeeName',
+          'assignedAtIso', 'createdByUid', 'createdByName', 'createdAt', 'updatedAt'
+        ]) &&
+        isStringSize(data.assetTag, 1, 60) &&
+        isStringSize(data.name, 1, 120) &&
+        data.category in ['Laptop', 'Desktop', 'Mobile phone', 'SIM card', 'Headset', 'Monitor', 'Keyboard', 'Mouse', 'ID card', 'Access card', 'Office equipment', 'Other'] &&
+        isOptionalStringSize(data, 'brand', 80) &&
+        isOptionalStringSize(data, 'model', 80) &&
+        isOptionalStringSize(data, 'serialNumber', 100) &&
+        (!( 'purchaseDate' in data ) || data.purchaseDate == '' || (data.purchaseDate is string && data.purchaseDate.matches('^\\d{4}-\\d{2}-\\d{2}$'))) &&
+        (!( 'purchaseCost' in data ) || (data.purchaseCost is number && data.purchaseCost >= 0 && data.purchaseCost <= 100000000)) &&
+        (!( 'currency' in data ) || (data.currency in ['INR', 'AED'] && (data.companyId != 'mygrade' || data.currency == 'INR'))) &&
+        (!( 'warrantyExpiry' in data ) || data.warrantyExpiry == '' || (data.warrantyExpiry is string && data.warrantyExpiry.matches('^\\d{4}-\\d{2}-\\d{2}$'))) &&
+        data.condition in ['New', 'Good', 'Fair', 'Damaged', 'Needs Repair'] &&
+        data.status in ['Available', 'Assigned', 'Under repair', 'Lost', 'Retired'] &&
+        data.companyId in ['talentgrade', 'mygrade'] &&
+        isOptionalStringSize(data, 'notes', 500) &&
+        isOptionalStringSize(data, 'photoAssetId', 128) &&
+        isOptionalStringSize(data, 'currentAssignmentId', 128) &&
+        isOptionalStringSize(data, 'assignedToEmployeeId', 128) &&
+        isOptionalStringSize(data, 'assignedToEmployeeUid', 128) &&
+        isOptionalStringSize(data, 'assignedToEmployeeName', 120) &&
+        isOptionalStringSize(data, 'assignedAtIso', 40) &&
+        isStringSize(data.createdByUid, 1, 128) &&
+        isStringSize(data.createdByName, 1, 120) &&
+        data.createdAt is timestamp &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidAssetAssignment(data) {
+      return data.keys().hasAll([
+          'assetId', 'assetTag', 'assetName', 'assetCategory', 'companyId',
+          'employeeId', 'employeeUid', 'employeeCode', 'employeeName', 'department',
+          'assignedDate', 'assignedByUid', 'assignedByName', 'conditionOnAssign',
+          'acknowledged', 'returned', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'assetId', 'assetTag', 'assetName', 'assetCategory', 'serialNumber',
+          'photoAssetId', 'companyId', 'employeeId', 'employeeUid', 'employeeCode',
+          'employeeName', 'department', 'managerUid', 'assignedDate', 'assignedByUid',
+          'assignedByName', 'conditionOnAssign', 'assignRemarks', 'acknowledged',
+          'acknowledgedByUid', 'acknowledgedByName', 'acknowledgedAtIso', 'acknowledgedAt',
+          'acknowledgmentStatement', 'returned', 'returnDate', 'returnCondition',
+          'returnRemarks', 'returnedByAdminUid', 'returnedByAdminName', 'returnedAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isStringSize(data.assetId, 1, 128) &&
+        isStringSize(data.assetTag, 1, 60) &&
+        isStringSize(data.assetName, 1, 120) &&
+        data.assetCategory in ['Laptop', 'Desktop', 'Mobile phone', 'SIM card', 'Headset', 'Monitor', 'Keyboard', 'Mouse', 'ID card', 'Access card', 'Office equipment', 'Other'] &&
+        isOptionalStringSize(data, 'serialNumber', 100) &&
+        isOptionalStringSize(data, 'photoAssetId', 128) &&
+        data.companyId in ['talentgrade', 'mygrade'] &&
+        isStringSize(data.employeeId, 1, 128) &&
+        data.employeeUid is string && data.employeeUid.size() <= 128 &&
+        isStringSize(data.employeeCode, 1, 40) &&
+        isStringSize(data.employeeName, 1, 120) &&
+        isStringSize(data.department, 1, 80) &&
+        isOptionalStringSize(data, 'managerUid', 128) &&
+        data.assignedDate is string && data.assignedDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+        isStringSize(data.assignedByUid, 1, 128) &&
+        isStringSize(data.assignedByName, 1, 120) &&
+        data.conditionOnAssign in ['New', 'Good', 'Fair', 'Damaged', 'Needs Repair'] &&
+        isOptionalStringSize(data, 'assignRemarks', 500) &&
+        data.acknowledged is bool &&
+        isOptionalStringSize(data, 'acknowledgedByUid', 128) &&
+        isOptionalStringSize(data, 'acknowledgedByName', 120) &&
+        isOptionalStringSize(data, 'acknowledgedAtIso', 40) &&
+        (!( 'acknowledgedAt' in data ) || data.acknowledgedAt is timestamp) &&
+        isOptionalStringSize(data, 'acknowledgmentStatement', 300) &&
+        data.returned is bool &&
+        (!( 'returnDate' in data ) || data.returnDate == '' || (data.returnDate is string && data.returnDate.matches('^\\d{4}-\\d{2}-\\d{2}$'))) &&
+        (!( 'returnCondition' in data ) || data.returnCondition in ['New', 'Good', 'Fair', 'Damaged', 'Needs Repair']) &&
+        isOptionalStringSize(data, 'returnRemarks', 500) &&
+        isOptionalStringSize(data, 'returnedByAdminUid', 128) &&
+        isOptionalStringSize(data, 'returnedByAdminName', 120) &&
+        (!( 'returnedAt' in data ) || data.returnedAt is timestamp) &&
+        data.createdAt is timestamp &&
+        data.updatedAt == request.time;
+    }
+
     // --- Collection Rules ---
 
     match /test/{docId} {
@@ -833,6 +975,7 @@ service cloud.firestore {
         (resource != null && (
           existing().assetType == 'company_logo' ||
           existing().assetType == 'profile_photo' ||
+          (existing().assetType == 'asset_photo' && isActiveEmployee()) ||
           existing().ownerUid == request.auth.uid ||
           isLeaderOrAdmin()
         ))
@@ -1123,6 +1266,166 @@ service cloud.firestore {
       );
       allow update: if false;
       allow delete: if isSuperAdmin() && isValidId(logId);
+    }
+
+    match /expenses/{expenseId} {
+      allow get: if hasAuth() && isValidId(expenseId) && (
+        isSuperAdmin() ||
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && (
+          existing().employeeUid == request.auth.uid ||
+          (isTeamLeader() && existing().companyId == getCallerCompanyId() &&
+            (existing().get('managerUid', '') == request.auth.uid || hasLeaderPermission('canApproveExpenses')))
+        ))
+      );
+      allow list: if hasAuth() && (
+        isBootstrappedAdmin() ||
+        isSuperAdmin() ||
+        resource.data.employeeUid == request.auth.uid ||
+        (isTeamLeader() && resource.data.companyId == getCallerCompanyId() &&
+          (resource.data.managerUid == request.auth.uid || hasLeaderPermission('canApproveExpenses')))
+      );
+      allow create: if isValidId(expenseId) &&
+        isActiveEmployee() &&
+        isValidExpenseClaim(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().employeeUid == request.auth.uid &&
+        incoming().status == 'Pending' &&
+        !('reviewedByUid' in incoming()) &&
+        !('paidByUid' in incoming()) &&
+        (isSuperAdmin() || incoming().companyId == getCallerCompanyId());
+      allow update: if isValidId(expenseId) &&
+        isValidExpenseClaim(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().employeeId == existing().employeeId &&
+        incoming().employeeUid == existing().employeeUid &&
+        incoming().companyId == existing().companyId && (
+          (isActiveEmployee() &&
+            existing().employeeUid == request.auth.uid &&
+            existing().status == 'Pending' &&
+            incoming().status == 'Pending' &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'category', 'amount', 'currency', 'expenseDate', 'description',
+              'notes', 'receiptAssetId', 'receiptFileName', 'receiptMimeType', 'updatedAt'
+            ])) ||
+          ((isSuperAdmin() || (hasLeaderPermission('canApproveExpenses') && existing().companyId == getCallerCompanyId() && existing().employeeUid != request.auth.uid)) && (
+            (existing().status == 'Pending' &&
+              incoming().status == 'Approved' &&
+              incoming().reviewedByUid == request.auth.uid &&
+              incoming().reviewedAt == request.time &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'status', 'reviewedByUid', 'reviewedByName', 'reviewedAtIso', 'reviewedAt', 'approvalNote', 'updatedAt'
+              ])) ||
+            (existing().status == 'Pending' &&
+              incoming().status == 'Rejected' &&
+              incoming().reviewedByUid == request.auth.uid &&
+              incoming().reviewedAt == request.time &&
+              isStringSize(incoming().rejectionReason, 3, 500) &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'status', 'reviewedByUid', 'reviewedByName', 'reviewedAtIso', 'reviewedAt', 'rejectionReason', 'updatedAt'
+              ])) ||
+            (existing().status == 'Approved' &&
+              incoming().status == 'Paid' &&
+              incoming().paidByUid == request.auth.uid &&
+              incoming().paidAt == request.time &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'status', 'paidByUid', 'paidByName', 'paidAtIso', 'paidAt', 'paymentReference', 'paymentNote', 'updatedAt'
+              ]))
+          ))
+        );
+      allow delete: if isValidId(expenseId) && (
+        isSuperAdmin() ||
+        (isActiveEmployee() && resource != null && existing().employeeUid == request.auth.uid && existing().status == 'Pending')
+      );
+    }
+
+    match /assets/{assetId} {
+      allow get: if hasAuth() && isValidId(assetId) && (
+        isSuperAdmin() ||
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && (
+          existing().get('assignedToEmployeeUid', '') == request.auth.uid ||
+          (hasLeaderPermission('canManageAssets') && existing().companyId == getCallerCompanyId())
+        ))
+      );
+      allow list: if hasAuth() && (
+        isBootstrappedAdmin() ||
+        isSuperAdmin() ||
+        resource.data.assignedToEmployeeUid == request.auth.uid ||
+        (hasLeaderPermission('canManageAssets') && resource.data.companyId == getCallerCompanyId())
+      );
+      allow create: if isValidId(assetId) &&
+        isValidCompanyAsset(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().createdByUid == request.auth.uid &&
+        (isSuperAdmin() || (hasLeaderPermission('canManageAssets') && incoming().companyId == getCallerCompanyId()));
+      allow update: if isValidId(assetId) &&
+        isValidCompanyAsset(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        (isSuperAdmin() || (hasLeaderPermission('canManageAssets') && existing().companyId == getCallerCompanyId() && incoming().companyId == existing().companyId));
+      allow delete: if isValidId(assetId) && isSuperAdmin();
+    }
+
+    match /assetAssignments/{assignmentId} {
+      allow get: if hasAuth() && isValidId(assignmentId) && (
+        isSuperAdmin() ||
+        (isActiveEmployee() && resource == null) ||
+        (resource != null && (
+          existing().employeeUid == request.auth.uid ||
+          (isTeamLeader() && existing().companyId == getCallerCompanyId() && (
+            existing().get('managerUid', '') == request.auth.uid ||
+            hasLeaderPermission('canManageAssets') ||
+            hasLeaderPermission('canViewAllEmployees')
+          ))
+        ))
+      );
+      allow list: if hasAuth() && (
+        isBootstrappedAdmin() ||
+        isSuperAdmin() ||
+        resource.data.employeeUid == request.auth.uid ||
+        (isTeamLeader() && resource.data.companyId == getCallerCompanyId() && (
+          resource.data.managerUid == request.auth.uid ||
+          hasLeaderPermission('canManageAssets') ||
+          hasLeaderPermission('canViewAllEmployees')
+        ))
+      );
+      allow create: if isValidId(assignmentId) &&
+        isValidAssetAssignment(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().assignedByUid == request.auth.uid &&
+        incoming().acknowledged == false &&
+        incoming().returned == false &&
+        (isSuperAdmin() || (hasLeaderPermission('canManageAssets') && incoming().companyId == getCallerCompanyId()));
+      allow update: if isValidId(assignmentId) &&
+        isValidAssetAssignment(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().assetId == existing().assetId &&
+        incoming().employeeId == existing().employeeId &&
+        incoming().employeeUid == existing().employeeUid &&
+        incoming().companyId == existing().companyId && (
+          (isActiveEmployee() &&
+            existing().employeeUid == request.auth.uid &&
+            existing().acknowledged == false &&
+            existing().returned == false &&
+            incoming().acknowledged == true &&
+            incoming().returned == false &&
+            incoming().acknowledgedByUid == request.auth.uid &&
+            incoming().acknowledgedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'acknowledged', 'acknowledgedByUid', 'acknowledgedByName',
+              'acknowledgedAtIso', 'acknowledgedAt', 'acknowledgmentStatement', 'updatedAt'
+            ])) ||
+          ((isSuperAdmin() || (hasLeaderPermission('canManageAssets') && existing().companyId == getCallerCompanyId())) &&
+            existing().returned == false &&
+            incoming().returned == true &&
+            incoming().returnedByAdminUid == request.auth.uid &&
+            incoming().returnedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'returned', 'returnDate', 'returnCondition', 'returnRemarks',
+              'returnedByAdminUid', 'returnedByAdminName', 'returnedAt', 'updatedAt'
+            ]))
+        );
+      allow delete: if false;
     }
   }
 }
