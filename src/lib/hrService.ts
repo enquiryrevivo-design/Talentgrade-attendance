@@ -2807,7 +2807,7 @@ export async function bulkGeneratePayrollRecords(
 
 export async function generatePayslipPdfBlob(payslip: PayrollRecord, settings: CompanySettings | null): Promise<Blob> {
   const user = auth.currentUser;
-  if (!user) throw new Error('Not authenticated');
+  if (!user) throw new Error('Authentication expired. Please sign in again.');
 
   const resolvedCompany = resolveCompanyProfile(payslip.companyId, settings, {
     companyId: payslip.companyId,
@@ -2819,24 +2819,55 @@ export async function generatePayslipPdfBlob(payslip: PayrollRecord, settings: C
 
   let logoDataUrl: string | undefined;
   if (resolvedCompany.logoAssetId) {
-    const logoAsset = await fetchMediaAsset(resolvedCompany.logoAssetId);
-    logoDataUrl = logoAsset?.dataUrl;
+    try {
+      const logoAsset = await fetchMediaAsset(resolvedCompany.logoAssetId);
+      logoDataUrl = logoAsset?.dataUrl;
+    } catch {
+      // Fall back to embedded corporate emblem if logo asset cannot be fetched
+      logoDataUrl = undefined;
+    }
   }
+
+  const slimCompany = settings
+    ? {
+        companyId: resolvedCompany.companyId,
+        companyName: settings.companyName,
+        companyAddress: settings.companyAddress,
+        companyPhone: settings.companyPhone,
+        companyEmail: settings.companyEmail,
+        companyWebsite: settings.companyWebsite,
+        taxId: settings.taxId,
+        logoAssetId: settings.logoAssetId,
+        currency: settings.currency,
+        companies: settings.companies,
+      }
+    : null;
 
   const sendRequest = async (forceRefresh: boolean) => {
     const token = await user.getIdToken(forceRefresh);
-    return fetch('/api/payslips/pdf', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        payslip,
-        company: settings,
-        logoDataUrl,
-      }),
-    });
+    try {
+      return await fetch('/api/payslips/pdf', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          payslip,
+          company: slimCompany,
+          logoDataUrl,
+        }),
+      });
+    } catch (networkErr) {
+      const msg = networkErr instanceof Error ? networkErr.message : '';
+      if (
+        networkErr instanceof TypeError ||
+        /failed to fetch|load failed|networkerror|network request failed/i.test(msg)
+      ) {
+        throw new Error('Unable to load payslip. Please check your connection and try again.');
+      }
+      throw new Error('Unable to load payslip. Please check your connection and try again.');
+    }
   };
 
   let res = await sendRequest(false);
@@ -2844,17 +2875,40 @@ export async function generatePayslipPdfBlob(payslip: PayrollRecord, settings: C
     res = await sendRequest(true);
   }
 
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+
   if (!res.ok) {
-    const contentType = res.headers.get('content-type') || '';
+    let serverErrMsg: string | null = null;
     if (contentType.includes('application/json')) {
       const errBody = await res.json().catch(() => null);
-      if (errBody && typeof errBody.error === 'string') {
-        throw new Error(errBody.error);
+      if (errBody && typeof errBody.error === 'string' && errBody.error.trim()) {
+        serverErrMsg = errBody.error.trim();
       }
     }
-    throw new Error(`Failed to generate payslip PDF (HTTP ${res.status})`);
+    if (res.status === 401) {
+      throw new Error('Authentication expired. Please sign in again.');
+    }
+    if (res.status === 403) {
+      throw new Error(serverErrMsg || 'You do not have permission to access this payslip.');
+    }
+    if (res.status === 404) {
+      throw new Error(serverErrMsg || 'Payslip not found.');
+    }
+    if (res.status >= 500) {
+      throw new Error(serverErrMsg || 'Unable to generate PDF.');
+    }
+    throw new Error(serverErrMsg || `Unable to generate PDF (HTTP ${res.status}).`);
   }
-  return res.blob();
+
+  if (!contentType.includes('application/pdf')) {
+    throw new Error('Unable to generate PDF. Unexpected server response format.');
+  }
+
+  const blob = await res.blob();
+  if (!blob || blob.size === 0) {
+    throw new Error('Unable to generate PDF.');
+  }
+  return blob;
 }
 
 export async function fetchLeaveLedger(currentEmployee: Employee): Promise<LeaveLedgerEntry[]> {

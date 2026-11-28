@@ -58,6 +58,7 @@ export {
   DEFAULT_COMPANY_ADDRESS,
   assertCurrencyAllowedForCompany,
   enforceCompanyCurrency,
+  formatPayslipPdfFilename,
   getAllowedCurrenciesForCompany,
   getCompanyShortName,
   isCurrencyAllowedForCompany,

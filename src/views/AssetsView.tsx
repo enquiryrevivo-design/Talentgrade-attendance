@@ -219,10 +219,15 @@ export function AssetsView() {
       .filter((e) => companyFilter === 'all' || normalizeCompanyId(e.companyId) === companyFilter)
       .map((emp) => ({
         employee: emp,
-        clearance: computeEmployeeAssetClearance(emp.id, assignments),
+        clearance: computeEmployeeAssetClearance(emp.id, assignments, assets),
       }))
-      .sort((a, b) => b.clearance.currentlyAssigned.length - a.clearance.currentlyAssigned.length);
-  }, [canManageAssets, employees, assignments, companyFilter]);
+      .sort(
+        (a, b) =>
+          b.clearance.currentlyAssigned.length +
+          b.clearance.lostAssets.length -
+          (a.clearance.currentlyAssigned.length + a.clearance.lostAssets.length)
+      );
+  }, [canManageAssets, employees, assignments, assets, companyFilter]);
 
   if (!employee || !settings) return null;
 
@@ -493,7 +498,7 @@ export function AssetsView() {
   };
 
   const totalPendingExitReturns = exitEmployeesWithClearance.reduce(
-    (sum, item) => sum + item.clearance.currentlyAssigned.length,
+    (sum, item) => sum + item.clearance.currentlyAssigned.length + item.clearance.lostAssets.length,
     0
   );
 
@@ -1052,6 +1057,17 @@ export function AssetsView() {
                     </span>
                   </div>
 
+                  <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono text-zinc-500">
+                    <span>Assigned: {clearance.assignments.length}</span>
+                    <span>Returned: {clearance.returned.length}</span>
+                    <span className={clearance.currentlyAssigned.length > 0 ? 'text-amber-700 dark:text-amber-400 font-semibold' : ''}>
+                      Pending Return: {clearance.currentlyAssigned.length}
+                    </span>
+                    <span className={clearance.lostAssets.length > 0 ? 'text-[#B5121B] dark:text-red-400 font-semibold' : ''}>
+                      Missing (Lost): {clearance.lostAssets.length}
+                    </span>
+                  </div>
+
                   {clearance.currentlyAssigned.length > 0 && (
                     <div className="space-y-2">
                       {clearance.currentlyAssigned.map((asg) => (
@@ -1072,6 +1088,24 @@ export function AssetsView() {
                             <PackageCheck className="w-3.5 h-3.5" />
                             Process Return
                           </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {clearance.lostAssets.length > 0 && (
+                    <div className="space-y-2">
+                      {clearance.lostAssets.map((lost) => (
+                        <div
+                          key={lost.id}
+                          className="p-3 rounded-xl border border-red-200 dark:border-red-900/70 bg-red-50/70 dark:bg-red-950/30 flex flex-wrap items-center justify-between gap-2 text-[#B5121B] dark:text-red-300"
+                        >
+                          <div>
+                            <span className="font-mono font-bold">{lost.assetTag}</span> ·{' '}
+                            <span className="font-semibold">{lost.name}</span> ({lost.category}) —{' '}
+                            <span className="font-semibold">Marked Missing / Lost</span>
+                          </div>
+                          <span className="text-[11px] font-mono">Clearance Hold</span>
                         </div>
                       ))}
                     </div>

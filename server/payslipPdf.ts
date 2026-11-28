@@ -15,6 +15,7 @@ const __dirname = path.dirname(__filename);
 function resolveFontPath(fileName: string, systemFallback: string): string {
   const localCandidates = [
     path.resolve(__dirname, '..', 'fonts', fileName),
+    path.resolve(__dirname, '..', '..', 'fonts', fileName),
     path.resolve(__dirname, 'fonts', fileName),
     path.resolve(process.cwd(), 'fonts', fileName),
     systemFallback,

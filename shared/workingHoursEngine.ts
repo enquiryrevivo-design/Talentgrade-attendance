@@ -211,19 +211,28 @@ export function buildWorkingHoursAnalytics(
     (settings.holidays || []).map((h) => h.date).filter((d) => isValidDateStr(d))
   );
 
-  // Index attendance records belonging strictly to this employee by date
-  const recordByDate = new Map<string, AttendanceRecord>();
+  // Index attendance records belonging strictly to this employee by date (supporting multiple sessions/records)
+  const recordsByDate = new Map<string, AttendanceRecord[]>();
   for (const r of records) {
-    if (r.employeeId !== employee.id) continue;
+    const matchesEmployee =
+      r.employeeId === employee.id || (Boolean(employee.uid) && r.employeeUid === employee.uid);
+    if (!matchesEmployee) continue;
     if (!isValidDateStr(r.date)) continue;
-    recordByDate.set(r.date, r);
+    const existing = recordsByDate.get(r.date);
+    if (existing) {
+      existing.push(r);
+    } else {
+      recordsByDate.set(r.date, [r]);
+    }
   }
 
   // Only consider explicitly Approved regularizations that produced valid punch-in & punch-out times
   const approvedByDate = new Map<string, AttendanceCorrection>();
   if (Array.isArray(input.approvedCorrections)) {
     for (const c of input.approvedCorrections) {
-      if (c.employeeId !== employee.id) continue;
+      const matchesEmployee =
+        c.employeeId === employee.id || (Boolean(employee.uid) && c.employeeUid === employee.uid);
+      if (!matchesEmployee) continue;
       if (c.status !== 'Approved') continue;
       if (!isValidDateStr(c.date)) continue;
       if (c.appliedChanges?.punchInTime && c.appliedChanges?.punchOutTime) {
@@ -241,41 +250,86 @@ export function buildWorkingHoursAnalytics(
     const isScheduledWorkingDay = workingDays.includes(dow);
     const isHoliday = holidayDates.has(date);
 
-    const rec = recordByDate.get(date);
+    const dayRecords = recordsByDate.get(date) || [];
+    const primaryRec = dayRecords[dayRecords.length - 1];
     const approvedCorr = approvedByDate.get(date);
 
-    let punchInTime = rec?.punchInTime;
-    let punchOutTime = rec?.punchOutTime;
-    let source: DailyWorkingHoursPoint['source'] = rec ? 'attendance' : 'none';
+    let totalSessionMinutes = 0;
+    let validSessionCount = 0;
+    let earliestInMs = Infinity;
+    let earliestInIso: string | undefined;
+    let latestOutMs = -Infinity;
+    let latestOutIso: string | undefined;
+    let hasOpenPunchIn = false;
+    let hasIncompleteStatus = false;
+    let hasLateFlag = false;
 
-    // If an approved regularization exists with valid timestamps and the main attendance record
-    // lacks valid punch-in/out (e.g. legacy sync delay), apply only the Approved correction timestamps
+    for (const r of dayRecords) {
+      if (r.isLate || r.status === 'Late') {
+        hasLateFlag = true;
+      }
+      if (r.status === 'Incomplete Attendance') {
+        hasIncompleteStatus = true;
+      }
+      if (r.punchInTime && !r.punchOutTime) {
+        hasOpenPunchIn = true;
+      }
+
+      if (r.punchInTime) {
+        const ms = Date.parse(r.punchInTime);
+        if (Number.isFinite(ms) && ms < earliestInMs) {
+          earliestInMs = ms;
+          earliestInIso = r.punchInTime;
+        } else if (!earliestInIso) {
+          earliestInIso = r.punchInTime;
+        }
+      }
+      if (r.punchOutTime) {
+        const ms = Date.parse(r.punchOutTime);
+        if (Number.isFinite(ms) && ms > latestOutMs) {
+          latestOutMs = ms;
+          latestOutIso = r.punchOutTime;
+        } else if (!latestOutIso) {
+          latestOutIso = r.punchOutTime;
+        }
+      }
+
+      if (r.status !== 'Incomplete Attendance' && r.status !== 'Absent' && r.status !== 'Leave') {
+        const dur = computeStrictPunchDurationMinutes(r.punchInTime, r.punchOutTime);
+        if (dur !== null && dur > 0) {
+          totalSessionMinutes += dur;
+          validSessionCount++;
+        }
+      }
+    }
+
+    let punchInTime = earliestInIso;
+    let punchOutTime = latestOutIso;
+    let source: DailyWorkingHoursPoint['source'] = dayRecords.length > 0 ? 'attendance' : 'none';
+    let strictMinutes: number | null = validSessionCount > 0 ? Math.min(1440, totalSessionMinutes) : null;
+
+    // If an approved regularization exists with valid timestamps and no valid punch session was recorded,
+    // apply only the Approved correction timestamps
     if (
       approvedCorr?.appliedChanges &&
-      (!punchInTime || !punchOutTime || rec?.status === 'Incomplete Attendance')
+      (strictMinutes === null || strictMinutes <= 0 || hasIncompleteStatus || hasOpenPunchIn)
     ) {
       const corrDuration = computeStrictPunchDurationMinutes(
         approvedCorr.appliedChanges.punchInTime,
         approvedCorr.appliedChanges.punchOutTime
       );
-      if (corrDuration !== null) {
+      if (corrDuration !== null && corrDuration > 0) {
         punchInTime = approvedCorr.appliedChanges.punchInTime;
         punchOutTime = approvedCorr.appliedChanges.punchOutTime;
+        strictMinutes = corrDuration;
         source = 'approved_regularization';
       }
     }
 
-    const recTz = resolveSafeTimezone(rec?.timezone || timezone);
-    const strictMinutes =
-      rec?.status === 'Incomplete Attendance' || rec?.status === 'Absent' || rec?.status === 'Leave'
-        ? source === 'approved_regularization'
-          ? computeStrictPunchDurationMinutes(punchInTime, punchOutTime)
-          : null
-        : computeStrictPunchDurationMinutes(punchInTime, punchOutTime);
-
+    const recTz = resolveSafeTimezone(primaryRec?.timezone || timezone);
     const hasValidDuration = strictMinutes !== null && strictMinutes > 0;
     const isIncompletePunch = Boolean(
-      (punchInTime && !punchOutTime) || rec?.status === 'Incomplete Attendance'
+      !hasValidDuration && (hasOpenPunchIn || hasIncompleteStatus)
     );
 
     const afterJoining = !isValidDateStr(employee.joiningDate) || date >= employee.joiningDate;
@@ -286,17 +340,20 @@ export function buildWorkingHoursAnalytics(
         isPastOrToday &&
         isScheduledWorkingDay &&
         !isHoliday &&
-        (!rec || rec.status === 'Absent') &&
+        (dayRecords.length === 0 || dayRecords.every((r) => r.status === 'Absent')) &&
         !hasValidDuration &&
         !isIncompletePunch
     );
 
     let effectiveStatus: DailyWorkingHoursPoint['status'];
-    if (rec) {
+    if (dayRecords.length > 0) {
       if (source === 'approved_regularization' && approvedCorr?.appliedChanges?.status) {
         effectiveStatus = approvedCorr.appliedChanges.status;
       } else {
-        effectiveStatus = rec.status;
+        const workedRec = [...dayRecords]
+          .reverse()
+          .find((r) => r.status === 'Present' || r.status === 'Late' || r.status === 'Half Day');
+        effectiveStatus = workedRec ? workedRec.status : primaryRec.status;
       }
     } else if (isHoliday) {
       effectiveStatus = 'Holiday';
@@ -311,9 +368,12 @@ export function buildWorkingHoursAnalytics(
     const workingMinutes = hasValidDuration ? strictMinutes! : 0;
     const workingHours = round2(workingMinutes / 60);
     const isLate = Boolean(
-      (rec?.isLate || rec?.status === 'Late') &&
-        effectiveStatus !== 'Leave' &&
-        effectiveStatus !== 'Absent'
+      hasLateFlag && effectiveStatus !== 'Leave' && effectiveStatus !== 'Absent'
+    );
+
+    const maxLateByMinutes = dayRecords.reduce(
+      (maxMin, r) => Math.max(maxMin, Number(r.lateByMinutes || 0)),
+      0
     );
 
     daily.push({
@@ -322,7 +382,7 @@ export function buildWorkingHoursAnalytics(
       label: formatShortDateLabel(date),
       isScheduledWorkingDay,
       isHoliday,
-      hasRecord: Boolean(rec),
+      hasRecord: dayRecords.length > 0,
       hasValidDuration,
       isIncompletePunch,
       isMissingAttendance,
@@ -334,7 +394,7 @@ export function buildWorkingHoursAnalytics(
       workingHours,
       status: effectiveStatus,
       isLate,
-      lateByMinutes: isLate ? Math.max(0, Number(rec?.lateByMinutes || 0)) : 0,
+      lateByMinutes: isLate ? maxLateByMinutes : 0,
       source,
     });
   }

@@ -14,16 +14,21 @@ import {
   Settings,
   BarChart3,
   BellRing,
+  Eye,
+  X,
+  ExternalLink,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useHrNotifications } from '../context/HrNotificationContext';
 import { useToast } from '../components/Toast';
 import { CameraCaptureModal } from '../components/CameraCaptureModal';
 import { CelebrationsWidget } from '../components/CelebrationsWidget';
+import { WorkingHoursAnalytics } from '../components/WorkingHoursAnalytics';
 import {
   AppPage,
   AttendanceRecord,
   Employee,
+  formatPayslipPdfFilename,
   LeaveApplication,
   PayrollRecord,
   REGULARIZATION_TYPE_LABELS,
@@ -67,6 +72,9 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
   const [payrolls, setPayrolls] = useState<PayrollRecord[]>([]);
   const [punchModal, setPunchModal] = useState<'in' | 'out' | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [previewingId, setPreviewingId] = useState<string | null>(null);
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
+  const [previewPayslip, setPreviewPayslip] = useState<PayrollRecord | null>(null);
   const [reminderOverview, setReminderOverview] = useState<ReminderOverviewMetrics | null>(null);
 
   const schedule = useMemo(() => {
@@ -123,8 +131,16 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
 
   if (!employee || !settings || !schedule) return null;
 
-  const myTodayRecord = attendance.find((a) => a.employeeId === employee.id && a.date === todayStr);
-  const myMonthRecords = attendance.filter((a) => a.employeeId === employee.id && a.date.startsWith(currentMonth));
+  const myPersonalAttendance = attendance.filter(
+    (a) => a.employeeId === employee.id || (Boolean(employee.uid) && a.employeeUid === employee.uid)
+  );
+  const myApprovedRegularizations = regularizations.filter(
+    (r) =>
+      r.status === 'Approved' &&
+      (r.employeeId === employee.id || (Boolean(employee.uid) && r.employeeUid === employee.uid))
+  );
+  const myTodayRecord = myPersonalAttendance.find((a) => a.date === todayStr);
+  const myMonthRecords = myPersonalAttendance.filter((a) => a.date.startsWith(currentMonth));
   const myLeaves = leaves.filter((l) => l.employeeId === employee.id);
   const myLatestPayslip = payrolls.find((p) => p.employeeId === employee.id && p.status === 'Published');
 
@@ -204,15 +220,30 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `Payslip_${payslip.employeeCode}_${payslip.month}.pdf`;
+      a.download = formatPayslipPdfFilename(payslip);
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
     } catch (err: unknown) {
-      showToast(err instanceof Error ? err.message : 'PDF download failed', 'error');
+      showToast(err instanceof Error ? err.message : 'Unable to generate PDF.', 'error');
     } finally {
       setDownloadingId(null);
+    }
+  };
+
+  const handlePreviewPayslip = async (payslip: PayrollRecord) => {
+    setPreviewingId(payslip.id);
+    try {
+      const blob = await generatePayslipPdfBlob(payslip, settings);
+      const url = URL.createObjectURL(blob);
+      if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
+      setPdfPreviewUrl(url);
+      setPreviewPayslip(payslip);
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Unable to load payslip.', 'error');
+    } finally {
+      setPreviewingId(null);
     }
   };
 
@@ -293,6 +324,18 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
             </button>
           </div>
         </div>
+      </section>
+
+      {/* PERSONAL WORKING HOURS ANALYTICS GRAPH — VISIBLE AUTOMATICALLY FOR EVERY LOGGED-IN EMPLOYEE */}
+      <section aria-label="Your Working Hours">
+        <WorkingHoursAnalytics
+          targetEmployee={employee}
+          attendanceRecords={myPersonalAttendance}
+          approvedCorrections={myApprovedRegularizations}
+          settings={settings}
+          compact
+          title="Your Working Hours"
+        />
       </section>
 
       {/* SUPER ADMIN / TEAM LEADER WORKFORCE OVERVIEW */}
@@ -712,14 +755,26 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
                   </div>
                   <span className="text-xs text-emerald-700 dark:text-emerald-400 font-medium">Published</span>
                 </div>
-                <button
-                  onClick={() => handleDownloadPayslip(myLatestPayslip)}
-                  disabled={downloadingId === myLatestPayslip.id}
-                  className="w-full min-h-[44px] inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 text-xs font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-50"
-                >
-                  <Download className="w-4 h-4" />
-                  {downloadingId === myLatestPayslip.id ? 'Generating PDF...' : 'Download Payslip PDF'}
-                </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handlePreviewPayslip(myLatestPayslip)}
+                    disabled={previewingId === myLatestPayslip.id || downloadingId === myLatestPayslip.id}
+                    className="min-h-[44px] inline-flex items-center justify-center gap-2 px-3 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 text-xs font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-50"
+                  >
+                    <Eye className="w-4 h-4" />
+                    {previewingId === myLatestPayslip.id ? 'Loading...' : 'Preview PDF'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadPayslip(myLatestPayslip)}
+                    disabled={downloadingId === myLatestPayslip.id || previewingId === myLatestPayslip.id}
+                    className="min-h-[44px] inline-flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-[#B5121B] hover:bg-[#960E16] text-white text-xs font-medium disabled:opacity-50"
+                  >
+                    <Download className="w-4 h-4" />
+                    {downloadingId === myLatestPayslip.id ? 'Generating...' : 'Download'}
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="text-xs text-zinc-500 dark:text-zinc-400 flex items-center gap-2 py-2">
@@ -737,6 +792,50 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
         onClose={() => setPunchModal(null)}
         onConfirm={handlePunchConfirm}
       />
+
+      {pdfPreviewUrl && previewPayslip && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-4xl h-[88vh] bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 flex flex-col overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-zinc-200 dark:border-zinc-800 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm font-semibold truncate">
+                Payslip PDF Preview — {previewPayslip.employeeName} ({previewPayslip.month})
+              </span>
+              <div className="flex items-center gap-2">
+                <a
+                  href={pdfPreviewUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="min-h-[34px] px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-xs font-medium inline-flex items-center gap-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Open in New Tab
+                </a>
+                <a
+                  href={pdfPreviewUrl}
+                  download={formatPayslipPdfFilename(previewPayslip)}
+                  className="min-h-[34px] px-3 py-1.5 rounded-lg bg-[#B5121B] hover:bg-[#960E16] text-white text-xs font-medium inline-flex items-center gap-1.5"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Download
+                </a>
+                <button
+                  type="button"
+                  onClick={() => {
+                    URL.revokeObjectURL(pdfPreviewUrl);
+                    setPdfPreviewUrl(null);
+                    setPreviewPayslip(null);
+                  }}
+                  aria-label="Close PDF preview"
+                  className="min-h-[36px] min-w-[36px] flex items-center justify-center text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+            <iframe src={pdfPreviewUrl} title="Payslip PDF Preview" className="w-full flex-1 bg-zinc-100" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -5,11 +5,14 @@
   "functions": {
     "api/index.ts": {
       "includeFiles": "{fonts/**,firebase-applet-config.json}"
+    },
+    "api/payslips/pdf.ts": {
+      "includeFiles": "{fonts/**,firebase-applet-config.json}"
     }
   },
   "rewrites": [
     {
-      "source": "/api/((?!server-time$).*)",
+      "source": "/api/((?!server-time$|payslips/pdf$).*)",
       "destination": "/api/index?__path=/api/$1"
     },
     {

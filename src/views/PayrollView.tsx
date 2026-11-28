@@ -12,6 +12,7 @@ import {
   Upload,
   Layers,
   Edit3,
+  ExternalLink,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../components/Toast';
@@ -22,6 +23,7 @@ import {
   Employee,
   EmployeeSalary,
   enforceCompanyCurrency,
+  formatPayslipPdfFilename,
   getCompanyShortName,
   normalizeCompanyId,
   PayrollRecord,
@@ -104,6 +106,8 @@ export function PayrollView() {
   // PDF Preview Modal
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const [previewTitle, setPreviewTitle] = useState('');
+  const [previewRecord, setPreviewRecord] = useState<PayrollRecord | null>(null);
+  const [pdfLoadingId, setPdfLoadingId] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     if (!employee) return;
@@ -460,25 +464,30 @@ export function PayrollView() {
   };
 
   const handlePdfAction = async (payslip: PayrollRecord, action: 'preview' | 'download') => {
+    const actionKey = `${payslip.id || payslip.employeeId}_${action}`;
+    setPdfLoadingId(actionKey);
     try {
       const blob = await generatePayslipPdfBlob(payslip, settings);
       const url = URL.createObjectURL(blob);
       if (action === 'preview') {
         if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
         setPdfPreviewUrl(url);
+        setPreviewRecord(payslip);
         setPreviewTitle(`${payslip.employeeName} — ${payslip.month}`);
       } else {
-        const prefix = getCompanyShortName(payslip.companyId || employeeCompanyMap[payslip.employeeId]);
+        const filename = formatPayslipPdfFilename(payslip);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `${prefix}_Payslip_${payslip.employeeCode}_${payslip.month}.pdf`;
+        a.download = filename;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
       }
     } catch (err: unknown) {
-      showToast(err instanceof Error ? err.message : 'PDF generation failed', 'error');
+      showToast(err instanceof Error ? err.message : 'Unable to generate PDF.', 'error');
+    } finally {
+      setPdfLoadingId(null);
     }
   };
 
@@ -529,19 +538,21 @@ export function PayrollView() {
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
+                        disabled={Boolean(pdfLoadingId)}
                         onClick={() => handlePdfAction(p, 'preview')}
-                        className="min-h-[40px] px-3.5 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 text-xs font-medium inline-flex items-center gap-1.5"
+                        className="min-h-[40px] px-3.5 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 text-xs font-medium inline-flex items-center gap-1.5 disabled:opacity-50"
                       >
                         <Eye className="w-3.5 h-3.5" />
-                        Preview PDF
+                        {pdfLoadingId === `${p.id || p.employeeId}_preview` ? 'Loading...' : 'Preview PDF'}
                       </button>
                       <button
                         type="button"
+                        disabled={Boolean(pdfLoadingId)}
                         onClick={() => handlePdfAction(p, 'download')}
-                        className="min-h-[40px] px-3.5 py-2 rounded-xl bg-[#B5121B] hover:bg-[#960E16] text-white text-xs font-medium inline-flex items-center gap-1.5"
+                        className="min-h-[40px] px-3.5 py-2 rounded-xl bg-[#B5121B] hover:bg-[#960E16] text-white text-xs font-medium inline-flex items-center gap-1.5 disabled:opacity-50"
                       >
                         <Download className="w-3.5 h-3.5" />
-                        Download
+                        {pdfLoadingId === `${p.id || p.employeeId}_download` ? 'Generating...' : 'Download'}
                       </button>
                     </div>
                   </div>
@@ -554,17 +565,39 @@ export function PayrollView() {
         {pdfPreviewUrl && (
           <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
             <div className="w-full max-w-4xl h-[88vh] bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 flex flex-col overflow-hidden">
-              <div className="px-5 py-3.5 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between">
-                <span className="text-sm font-semibold">{previewTitle}</span>
-                <button
-                  onClick={() => {
-                    URL.revokeObjectURL(pdfPreviewUrl);
-                    setPdfPreviewUrl(null);
-                  }}
-                  className="min-h-[36px] min-w-[36px] flex items-center justify-center text-zinc-500"
-                >
-                  <X className="w-5 h-5" />
-                </button>
+              <div className="px-5 py-3.5 border-b border-zinc-200 dark:border-zinc-800 flex flex-wrap items-center justify-between gap-2">
+                <span className="text-sm font-semibold truncate">{previewTitle}</span>
+                <div className="flex items-center gap-2">
+                  <a
+                    href={pdfPreviewUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="min-h-[34px] px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-xs font-medium inline-flex items-center gap-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Open in New Tab
+                  </a>
+                  <a
+                    href={pdfPreviewUrl}
+                    download={previewRecord ? formatPayslipPdfFilename(previewRecord) : 'Payslip.pdf'}
+                    className="min-h-[34px] px-3 py-1.5 rounded-lg bg-[#B5121B] hover:bg-[#960E16] text-white text-xs font-medium inline-flex items-center gap-1.5"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Download
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      URL.revokeObjectURL(pdfPreviewUrl);
+                      setPdfPreviewUrl(null);
+                      setPreviewRecord(null);
+                    }}
+                    aria-label="Close PDF preview"
+                    className="min-h-[36px] min-w-[36px] flex items-center justify-center text-zinc-500"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
               </div>
               <iframe src={pdfPreviewUrl} title="Payslip PDF Preview" className="w-full flex-1 bg-zinc-100" />
             </div>
@@ -1536,17 +1569,39 @@ export function PayrollView() {
       {pdfPreviewUrl && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-4xl h-[88vh] bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 flex flex-col overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between">
-              <span className="text-sm font-semibold">Payslip PDF Preview — {previewTitle}</span>
-              <button
-                onClick={() => {
-                  URL.revokeObjectURL(pdfPreviewUrl);
-                  setPdfPreviewUrl(null);
-                }}
-                className="min-h-[36px] min-w-[36px] flex items-center justify-center text-zinc-500"
-              >
-                <X className="w-5 h-5" />
-              </button>
+            <div className="px-5 py-3.5 border-b border-zinc-200 dark:border-zinc-800 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm font-semibold truncate">Payslip PDF Preview — {previewTitle}</span>
+              <div className="flex items-center gap-2">
+                <a
+                  href={pdfPreviewUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="min-h-[34px] px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-xs font-medium inline-flex items-center gap-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Open in New Tab
+                </a>
+                <a
+                  href={pdfPreviewUrl}
+                  download={previewRecord ? formatPayslipPdfFilename(previewRecord) : 'Payslip.pdf'}
+                  className="min-h-[34px] px-3 py-1.5 rounded-lg bg-[#B5121B] hover:bg-[#960E16] text-white text-xs font-medium inline-flex items-center gap-1.5"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Download
+                </a>
+                <button
+                  type="button"
+                  onClick={() => {
+                    URL.revokeObjectURL(pdfPreviewUrl);
+                    setPdfPreviewUrl(null);
+                    setPreviewRecord(null);
+                  }}
+                  aria-label="Close PDF preview"
+                  className="min-h-[36px] min-w-[36px] flex items-center justify-center text-zinc-500"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
             <iframe src={pdfPreviewUrl} title="Payslip PDF Preview" className="w-full flex-1 bg-zinc-100" />
           </div>

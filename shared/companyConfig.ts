@@ -228,3 +228,48 @@ export function resolveCompanyProfile(
     isOverridden,
   };
 }
+
+const PDF_MONTH_NAMES = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
+
+export function formatPayslipPdfFilename(payslip: {
+  month?: string | null;
+  employeeName?: string | null;
+  employeeCode?: string | null;
+}): string {
+  const rawMonth = String(payslip?.month || '').trim();
+  const match = /^(\d{4})-(\d{1,2})$/.exec(rawMonth);
+  let periodSegment = 'Payslip';
+  if (match) {
+    const year = match[1];
+    const monthNum = Number(match[2]);
+    const monthName =
+      monthNum >= 1 && monthNum <= 12 ? PDF_MONTH_NAMES[monthNum - 1] : `M${String(monthNum).padStart(2, '0')}`;
+    periodSegment = `${monthName}_${year}`;
+  } else if (rawMonth) {
+    periodSegment = rawMonth.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'Period';
+  }
+
+  const rawName = String(payslip?.employeeName || payslip?.employeeCode || 'Employee').trim();
+  const safeName =
+    rawName
+      .replace(/\s+/g, '_')
+      .replace(/[^a-zA-Z0-9_-]/g, '')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'Employee';
+
+  return `Payslip_${periodSegment}_${safeName}.pdf`;
+}
+

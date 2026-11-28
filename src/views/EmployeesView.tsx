@@ -21,6 +21,7 @@ import {
   AssetAssignment,
   AttendanceCorrection,
   AttendanceRecord,
+  CompanyAsset,
   CompanyId,
   Department,
   Employee,
@@ -57,7 +58,7 @@ import {
   uploadMediaAsset,
 } from '../lib/hrService';
 import { fetchAttendanceRegularizations } from '../lib/regularizationService';
-import { computeEmployeeAssetClearance, fetchAssetAssignments } from '../lib/assetService';
+import { computeEmployeeAssetClearance, fetchAssetAssignments, fetchAssets } from '../lib/assetService';
 import {
   calculateCasualLeaveEligibilityDate,
   computeEmployeeLeaveAccrualPlan,
@@ -158,6 +159,7 @@ export function EmployeesView() {
   const [empAttendance, setEmpAttendance] = useState<AttendanceRecord[]>([]);
   const [empApprovedCorrections, setEmpApprovedCorrections] = useState<AttendanceCorrection[]>([]);
   const [empAssetAssignments, setEmpAssetAssignments] = useState<AssetAssignment[]>([]);
+  const [empAssets, setEmpAssets] = useState<CompanyAsset[]>([]);
   const [empLeaves, setEmpLeaves] = useState<LeaveApplication[]>([]);
   const [empLedger, setEmpLedger] = useState<LeaveLedgerEntry[]>([]);
   const [empSalary, setEmpSalary] = useState<EmployeeSalary | null>(null);
@@ -402,18 +404,20 @@ export function EmployeesView() {
         isSuperAdmin || Boolean(settings?.teamLeaderPermissions?.canApproveCorrections);
       const canManageAssets =
         isSuperAdmin || Boolean(settings?.teamLeaderPermissions?.canManageAssets);
-      const [allAtt, allLeaves, allLedger, allCorrections, allAssignments] = await Promise.all([
+      const [allAtt, allLeaves, allLedger, allCorrections, allAssignments, allAssets] = await Promise.all([
         fetchAttendanceRecords(employee, undefined, canViewAll),
         fetchLeaveApplications(employee),
         fetchLeaveLedger(employee),
         fetchAttendanceRegularizations(employee, canApproveCor).catch(() => []),
         fetchAssetAssignments(employee, canManageAssets, canViewAll).catch(() => []),
+        fetchAssets(employee, canManageAssets).catch(() => []),
       ]);
       setEmpAttendance(allAtt.filter((a) => a.employeeId === emp.id));
       setEmpApprovedCorrections(
         allCorrections.filter((c) => c.employeeId === emp.id && c.status === 'Approved')
       );
       setEmpAssetAssignments(allAssignments.filter((asg) => asg.employeeId === emp.id));
+      setEmpAssets(allAssets);
       setEmpLeaves(allLeaves.filter((l) => l.employeeId === emp.id));
       setEmpLedger(allLedger.filter((x) => x.employeeId === emp.id));
 
@@ -2009,12 +2013,18 @@ export function EmployeesView() {
 
                   {(() => {
                     const effectiveStatus = editForm.status || selectedEmp.status;
-                    const clearance = computeEmployeeAssetClearance(selectedEmp.id, empAssetAssignments);
+                    const clearance = computeEmployeeAssetClearance(
+                      selectedEmp.id,
+                      empAssetAssignments,
+                      empAssets
+                    );
                     const isExitState =
                       effectiveStatus === 'Resigned' ||
                       effectiveStatus === 'Terminated' ||
                       effectiveStatus === 'Inactive';
-                    if (!isExitState && clearance.assignments.length === 0) return null;
+                    if (!isExitState && clearance.assignments.length === 0 && clearance.lostAssets.length === 0) {
+                      return null;
+                    }
                     return (
                       <div className="p-4 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-950/60 space-y-2.5">
                         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2034,7 +2044,13 @@ export function EmployeesView() {
                             {clearance.clearanceStatus}
                           </span>
                         </div>
-                        {clearance.currentlyAssigned.length > 0 ? (
+                        <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono text-zinc-500">
+                          <span>Assigned: {clearance.assignments.length}</span>
+                          <span>Returned: {clearance.returned.length}</span>
+                          <span>Pending Return: {clearance.currentlyAssigned.length}</span>
+                          <span>Missing (Lost): {clearance.lostAssets.length}</span>
+                        </div>
+                        {clearance.currentlyAssigned.length > 0 && (
                           <div className="space-y-1.5">
                             <div className="text-[11px] text-[#B5121B] dark:text-red-400 font-medium">
                               Pending Return ({clearance.currentlyAssigned.length}):
@@ -2051,7 +2067,26 @@ export function EmployeesView() {
                               </div>
                             ))}
                           </div>
-                        ) : (
+                        )}
+                        {clearance.lostAssets.length > 0 && (
+                          <div className="space-y-1.5">
+                            <div className="text-[11px] text-[#B5121B] dark:text-red-400 font-medium">
+                              Missing / Lost ({clearance.lostAssets.length}):
+                            </div>
+                            {clearance.lostAssets.map((lost) => (
+                              <div
+                                key={lost.id}
+                                className="px-3 py-2 rounded-lg bg-red-50/70 dark:bg-red-950/30 border border-red-200 dark:border-red-900/70 flex items-center justify-between gap-2 text-[11px] text-[#B5121B] dark:text-red-300"
+                              >
+                                <span>
+                                  <span className="font-mono font-bold">{lost.assetTag}</span> · {lost.name} ({lost.category})
+                                </span>
+                                <span className="font-mono font-semibold">Lost</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {clearance.currentlyAssigned.length === 0 && clearance.lostAssets.length === 0 && (
                           <div className="text-[11px] text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1.5">
                             <CheckCircle2 className="w-3.5 h-3.5" />
                             All assigned company assets have been returned or none assigned.

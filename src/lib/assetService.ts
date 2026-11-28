@@ -52,20 +52,38 @@ export interface EmployeeAssetClearanceSummary {
   currentlyAssigned: AssetAssignment[];
   unacknowledged: AssetAssignment[];
   returned: AssetAssignment[];
+  lostAssets: CompanyAsset[];
   clearanceStatus: 'No Assets Assigned' | 'Pending Return' | 'Pending Acknowledgment' | 'Cleared';
 }
 
 export function computeEmployeeAssetClearance(
   employeeId: string,
-  assignments: AssetAssignment[]
+  assignments: AssetAssignment[],
+  assets?: CompanyAsset[]
 ): EmployeeAssetClearanceSummary {
   const empAssignments = assignments.filter((a) => a.employeeId === employeeId);
   const currentlyAssigned = empAssignments.filter((a) => !a.returned);
   const unacknowledged = currentlyAssigned.filter((a) => !a.acknowledged);
   const returned = empAssignments.filter((a) => a.returned);
 
+  const lostAssets: CompanyAsset[] = [];
+  if (Array.isArray(assets) && assets.length > 0) {
+    const linkedAssetIds = new Set(empAssignments.map((a) => a.assetId));
+    const seenLost = new Set<string>();
+    for (const asset of assets) {
+      if (
+        asset.status === 'Lost' &&
+        !seenLost.has(asset.id) &&
+        (asset.assignedToEmployeeId === employeeId || linkedAssetIds.has(asset.id))
+      ) {
+        seenLost.add(asset.id);
+        lostAssets.push(asset);
+      }
+    }
+  }
+
   let clearanceStatus: EmployeeAssetClearanceSummary['clearanceStatus'] = 'No Assets Assigned';
-  if (currentlyAssigned.length > 0) {
+  if (currentlyAssigned.length > 0 || lostAssets.length > 0) {
     clearanceStatus = 'Pending Return';
   } else if (empAssignments.length > 0) {
     clearanceStatus = 'Cleared';
@@ -77,6 +95,7 @@ export function computeEmployeeAssetClearance(
     currentlyAssigned,
     unacknowledged,
     returned,
+    lostAssets,
     clearanceStatus,
   };
 }

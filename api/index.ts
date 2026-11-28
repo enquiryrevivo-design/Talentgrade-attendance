@@ -36,13 +36,22 @@ function restoreRewrittenApiUrl(req: IncomingMessage) {
   }
 }
 
-export default function handler(req: IncomingMessage, res: ServerResponse) {
+export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   try {
     restoreRewrittenApiUrl(req);
     const app = getApp();
-    return app(req as Parameters<Express>[0], res as Parameters<Express>[1]);
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        res.off('finish', done);
+        res.off('close', done);
+        resolve();
+      };
+      res.on('finish', done);
+      res.on('close', done);
+      app(req as Parameters<Express>[0], res as Parameters<Express>[1]);
+    });
   } catch (err) {
-    console.error('Unhandled API handler error:', err);
+    console.error('Unhandled API handler error:', err instanceof Error ? err.message : 'Unknown error');
     if (!res.headersSent) {
       res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json; charset=utf-8');

@@ -21,6 +21,7 @@ interface WorkingHoursAnalyticsProps {
   approvedCorrections?: AttendanceCorrection[];
   settings: CompanySettings;
   compact?: boolean;
+  title?: string;
 }
 
 type ChartMode = 'daily' | 'weekly' | 'monthly';
@@ -31,6 +32,7 @@ export function WorkingHoursAnalytics({
   approvedCorrections = [],
   settings,
   compact = false,
+  title = 'Working Hours History & Analytics',
 }: WorkingHoursAnalyticsProps) {
   const schedule = getEffectiveSchedule(targetEmployee, settings);
   const todayLocal = getTodayInTimezone(schedule.timezone);
@@ -137,7 +139,7 @@ export function WorkingHoursAnalytics({
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold text-zinc-950 dark:text-zinc-100">
             <BarChart3 className="w-4 h-4 text-[#B5121B]" />
-            Working Hours History &amp; Analytics
+            {title}
           </div>
           <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 font-mono">
             {analytics.summary.startDate} → {analytics.summary.endDate} · Strict punch-in/punch-out verified ({schedule.timezone})
